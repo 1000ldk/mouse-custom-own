@@ -1,0 +1,44 @@
+# main に push されるたびに Windows 用の exe をビルドし、
+# GitHub Releases の "latest" に置き直す。
+# ダウンロード URL は常に同じ:
+#   https://github.com/1000ldk/mouse-custom-own/releases/latest/download/pinch-zoom.exe
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinch-zoom
+          path: target/release/pinch-zoom.exe
+
+      - name: Publish "latest" release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest target/release/pinch-zoom.exe \
+            --target "$GITHUB_SHA" \
+            --title "pinch-zoom (latest)" \
+            --notes "main の最新コミット ($GITHUB_SHA) からの自動ビルドです。インストール方法は README を参照してください。" \
+            --latest

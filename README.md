@@ -15,6 +15,31 @@ Rust + [windows クレート](https://crates.io/crates/windows) で書いてい�
 - 細かいイベントを蓄積し、閾値に達したら 1 段ズーム → クールダウン
 - タスクトレイ常駐 (有効/無効, 設定ファイルを開く, 設定を再読み込み, 終了)。ウィンドウは出ません
 
+## インストール (かんたん)
+
+**PowerShell** を開いて (スタートメニューで「PowerShell」と検索)、次の 1 行を貼り付けて Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/1000ldk/mouse-custom-own/main/install.ps1 | iex
+```
+
+これだけで次のことが行われます。管理者権限も Rust も要りません。
+
+1. ビルド済みの `pinch-zoom.exe` を GitHub Releases からダウンロード
+2. `%LOCALAPPDATA%\Programs\pinch-zoom\` に配置
+3. Windows サインイン時に自動起動するよう登録
+4. 起動 (タスクトレイにアイコンが出ます)
+
+- **更新**: 同じ 1 行をもう一度実行 (`config.toml` はそのまま残ります)
+- **アンインストール**:
+  ```powershell
+  irm https://raw.githubusercontent.com/1000ldk/mouse-custom-own/main/uninstall.ps1 | iex
+  ```
+- 自動起動はトレイメニューの「Windows 起動時に自動実行」でも切り替えられます。
+- exe は main ブランチに push されるたびに GitHub Actions (`.github/workflows/release.yml`) が自動でビルドし、
+  [Releases の latest](https://github.com/1000ldk/mouse-custom-own/releases/latest) に置いています。
+  ブラウザから直接ダウンロードして使うこともできます (その場合は SmartScreen の警告が出たら「詳細情報 → 実行」)。
+
 ## 仕組み
 
 ### 前提: ピンチは「Ctrl+ホイール」として届く
@@ -72,6 +97,7 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
 | `src/keys.rs` | `"Ctrl+NumpadAdd"` のようなキー文字列 → 仮想キーコード | **なし** |
 | `src/foreground.rs` | フォアグラウンドウィンドウ → PID → 実行ファイル名 (PID でキャッシュ) | あり |
 | `src/input.rs` | `SendInput` で任意のキーの組み合わせを送る | あり |
+| `src/autostart.rs` | サインイン時の自動起動 (レジストリの Run キー) の登録/解除 | あり |
 | `src/window.rs` | 非表示ウィンドウ、ウィンドウプロシージャ、タスクトレイとメニュー | あり |
 | `src/app.rs` | 全体の状態 (`thread_local!` + `RefCell`)。コールバックから参照する | あり |
 
@@ -88,7 +114,7 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
   Go はコールバックとスレッド (`runtime.LockOSThread` が必須) の扱いに癖があります。
   「Win32 を学ぶ」目的なら Rust か C++ が素直です。
 
-## ビルド
+## ソースからビルドする (開発者向け)
 
 Windows 上で:
 
@@ -101,6 +127,8 @@ cargo build --release
 # => target\release\pinch-zoom.exe
 ```
 
+- 自分でビルドした exe をインストールするには:
+  `powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExePath target\release\pinch-zoom.exe`
 - `cargo run` (debug ビルド) はコンソール付きで起動します。release ビルドはコンソールを出しません。
 - ロジックのテストは OS を問わず `cargo test` で実行できます。
 
@@ -108,7 +136,7 @@ cargo build --release
 
 `pinch-zoom.exe` を起動するとタスクトレイにアイコンが出ます。
 
-- **右クリック**: メニュー (有効 / 設定ファイルを開く / 設定を再読み込み / 終了)
+- **右クリック**: メニュー (有効 / 設定ファイルを開く / 設定を再読み込み / Windows 起動時に自動実行 / 終了)
 - **ダブルクリック**: 有効⇔無効の切り替え (無効中は警告アイコン)
 
 二重に起動しても 2 つ目はすぐ終了します。
@@ -183,26 +211,12 @@ exe を書き込み禁止のフォルダ (`C:\Program Files` など) に置い�
 
 ## スタートアップ登録
 
-どれか 1 つで OK です。
+インストールスクリプトを使った場合は登録済みです。それ以外の場合は、トレイアイコンの右クリックメニューで
+**「Windows 起動時に自動実行」** にチェックを入れてください。
 
-### A. スタートアップフォルダにショートカットを置く (いちばん簡単)
-
-1. `Win + R` → `shell:startup` → Enter
-2. 開いたフォルダに `pinch-zoom.exe` のショートカットを作成 (exe を右ドラッグ →「ショートカットをここに作成」)
-
-### B. レジストリの Run キーに登録する
-
-PowerShell で (パスは置いた場所に合わせる):
-
-```powershell
-$exe = "$env:LOCALAPPDATA\Programs\pinch-zoom\pinch-zoom.exe"
-New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-  -Name "pinch-zoom" -Value "`"$exe`"" -PropertyType String -Force
-```
-
-解除: `Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "pinch-zoom"`
-
-どちらの方法も「設定 → アプリ → スタートアップ」で有効/無効を切り替えられます。
+これは `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` に exe のパスを書き込んでいるだけで、
+「設定 → アプリ → スタートアップ」の一覧からも有効/無効を切り替えられます。
+`shell:startup` フォルダに exe のショートカットを置く方法でも構いません (二重に登録しても多重起動防止により 1 つしか動きません)。
 
 ## 注意・トラブルシュート
 
