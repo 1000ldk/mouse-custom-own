@@ -4,7 +4,8 @@
 既定では次のように動きます。
 
 - **VS Code / Cursor**: エディタの文字だけでなく **ウィンドウ全体をズーム** (`Ctrl+テンキー+` / `Ctrl+テンキー-`)
-- **それ以外の全アプリ**: **Windows 拡大鏡で画面ごと拡大・縮小** (`Win+テンキー+` / `Win+テンキー-`)。拡大鏡は `Win+Esc` で終了
+- **それ以外の全アプリ**: **画面全体をピンチ量に合わせて滑らかに拡大・縮小** (スマホのピンチズームのような動き)。
+  ピンチした場所が中心になり、拡大中はカーソルを動かすと表示が追従します。ピンチインで等倍に戻せば終了です。
 
 送るキーやアプリの組み合わせは `config.toml` で自由に変えられます ([設定](#設定))。
 
@@ -58,14 +59,17 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
  hook::mouse_proc
        ├─ ホイール以外 / Ctrl 無し / 無効中 / 一致するルール無し / pass ルール → CallNextHookEx (そのまま通す)
        └─ フォアグラウンドのアプリに一致するルールあり (config.toml の [[rules]] を上から順に照合)
-            ├─ gesture::PinchTracker に delta を渡す
+            ├─ キーを送るルール: gesture::PinchTracker に delta を渡す
             │     閾値到達 & クールダウン外 → ルールのキーを PostMessage(WM_APP_SEND_KEYS) で自分のウィンドウに依頼
+            ├─ screen_zoom ルール (または画面ズーム中): delta をそのまま倍率に反映
+            │     → PostMessage(WM_APP_UPDATE_SCREEN_ZOOM)  ※マウス移動時も表示位置更新のために投函
             └─ LRESULT(1) を返して元のイベントを握りつぶす
 
  main のメッセージループ: GetMessage → DispatchMessage
        ▼
  window::wnd_proc
        ├─ WM_APP_SEND_KEYS → input::send_combo … SendInput でキーを送る
+       ├─ WM_APP_UPDATE_SCREEN_ZOOM → magnifier … MagSetFullscreenTransform で画面全体の倍率・表示位置を設定
        ├─ WM_APP_TRAY → トレイのクリック (右クリック: メニュー / ダブルクリック: 有効⇔無効)
        └─ TaskbarCreated → Explorer 再起動時にトレイアイコンを登録し直す
 ```
@@ -97,6 +101,8 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
 | `src/keys.rs` | `"Ctrl+NumpadAdd"` のようなキー文字列 → 仮想キーコード | **なし** |
 | `src/foreground.rs` | フォアグラウンドウィンドウ → PID → 実行ファイル名 (PID でキャッシュ) | あり |
 | `src/input.rs` | `SendInput` で任意のキーの組み合わせを送る | あり |
+| `src/screen_zoom.rs` | 画面ズームの倍率計算と、カーソル位置からの表示位置計算 | **なし** |
+| `src/magnifier.rs` | Magnification API (`MagSetFullscreenTransform`) の呼び出し | あり |
 | `src/autostart.rs` | サインイン時の自動起動 (レジストリの Run キー) の登録/解除 | あり |
 | `src/window.rs` | 非表示ウィンドウ、ウィンドウプロシージャ、タスクトレイとメニュー | あり |
 | `src/app.rs` | 全体の状態 (`thread_local!` + `RefCell`)。コールバックから参照する | あり |
@@ -160,8 +166,14 @@ zoom_out = "Ctrl+NumpadSubtract"      # ピンチインで送るキー
 
 [[rules]]
 apps = ["*"]                          # "*" = 上のどれにも一致しなかった全アプリ
-zoom_in = "Win+NumpadAdd"             # Windows 拡大鏡
-zoom_out = "Win+NumpadSubtract"
+screen_zoom = true                    # 画面全体を連続ズーム
+```
+
+画面ズームの調整 (ファイルの先頭に書く):
+
+```toml
+screen_zoom_max = 8.0      # 最大倍率
+screen_zoom_speed = 400.0  # 倍率を 2 倍にするのに必要なピンチ量。小さいほど少しのピンチで大きく拡大
 ```
 
 ### ルールの書き方
@@ -170,6 +182,7 @@ zoom_out = "Win+NumpadSubtract"
 | --- | --- |
 | `apps` | 実行ファイル名のリスト。`"*"` は全アプリ。タスクマネージャーの「詳細」タブで名前を確認できます |
 | `zoom_in` / `zoom_out` | ピンチアウト / ピンチインで送るキー |
+| `screen_zoom = true` | キーを送る代わりに画面全体を連続ズームする |
 | `pass = true` | 何もせずアプリにそのまま渡す (ブラウザなど、アプリ本来のピンチズームを使いたいとき) |
 | `threshold` / `cooldown_ms` | そのルールだけ全体の値を上書き |
 
@@ -198,7 +211,7 @@ zoom_out = "Ctrl+Minus"
 cooldown_ms = 200
 ```
 
-拡大鏡を使わず VS Code だけで動かしたい場合は、`apps = ["*"]` のルールを削除してください。
+画面ズームを使わず VS Code だけで動かしたい場合は、`apps = ["*"]` のルールを削除してください。
 
 調整の目安:
 
@@ -223,7 +236,10 @@ exe を書き込み禁止のフォルダ (`C:\Program Files` など) に置い�
 - **VS Code を管理者として実行している場合は動きません。** Windows の UIPI により、通常権限のプロセスから
   管理者権限のウィンドウへ `SendInput` できないためです。本ツールも管理者で起動するか、VS Code を通常権限で起動してください。
 - **AutoHotkey の同等スクリプトと同時に動かさないでください。** 両方がフックして、二重にズームしたり片方が何もしなくなったりします。
-- **拡大鏡**: 初めて `Win+テンキー+` を送ると拡大鏡が起動します。終了は `Win+Esc`。
-  拡大率の刻みや表示方法 (全画面 / レンズ / ドッキング) は「設定 → アクセシビリティ → 拡大鏡」で変えられます。
+- **画面ズーム**は Windows の Magnification API (標準の拡大鏡と同じ仕組み) を使っています。
+  - 拡大中は、どのアプリの上でピンチしても画面ズームの操作になります (VS Code に切り替えても戻せるように)。
+  - Windows の拡大鏡 (`Win++`) と同時には使えません。拡大鏡を起動している場合は `Win+Esc` で終了してください。
+  - 拡大したまま操作に困ったら、トレイアイコンをダブルクリック (無効化) すると等倍に戻ります。
+  - 表示位置の計算は主モニター基準です。複数モニター環境での動作は未確認です。
 - VS Code 用のキーは VS Code 既定のキーバインド (`workbench.action.zoomIn` = `Ctrl+NumpadAdd`,
   `workbench.action.zoomOut` = `Ctrl+NumpadSubtract`) を前提にしています。キーバインドを変えている場合は戻してください。

@@ -29,14 +29,14 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, HC_ACTION, HHOOK, MSLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEWHEEL,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
 };
 
-use crate::app::with_state;
+use crate::app::{AppState, with_state};
 use crate::config::{RuleAction, find_rule};
 use crate::gesture::ZoomDirection;
 use crate::input::is_ctrl_down;
-use crate::window::WM_APP_SEND_KEYS;
+use crate::window::{WM_APP_SEND_KEYS, WM_APP_UPDATE_SCREEN_ZOOM};
 
 /// 登録したフック。Drop で解除される (RAII)。
 pub struct MouseHook(HHOOK);
@@ -75,12 +75,19 @@ enum Verdict {
 /// - `wparam`: メッセージの種類 (WM_MOUSEMOVE, WM_MOUSEWHEEL, ...)
 /// - `lparam`: MSLLHOOKSTRUCT へのポインタ (座標、ホイール量、フラグ)
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && wparam.0 as u32 == WM_MOUSEWHEEL {
-        // SAFETY: WH_MOUSE_LL の HC_ACTION では lparam は必ず有効な MSLLHOOKSTRUCT を指す。
-        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-        if let Verdict::Swallow = on_wheel(info) {
-            // 0 以外を返し、CallNextHookEx を呼ばない = このイベントは誰にも届かない。
-            return LRESULT(1);
+    if code == HC_ACTION as i32 {
+        match wparam.0 as u32 {
+            WM_MOUSEWHEEL => {
+                // SAFETY: WH_MOUSE_LL の HC_ACTION では lparam は必ず有効な MSLLHOOKSTRUCT を指す。
+                let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+                if let Verdict::Swallow = on_wheel(info) {
+                    // 0 以外を返し、CallNextHookEx を呼ばない = このイベントは誰にも届かない。
+                    return LRESULT(1);
+                }
+            }
+            // 画面ズーム中はカーソルに合わせて表示位置を動かす (移動イベント自体は素通し)
+            WM_MOUSEMOVE => on_move(),
+            _ => {}
         }
     }
     // 自分が興味の無いイベントは必ず次へ回す。忘れると全アプリのマウスが効かなくなる。
@@ -101,6 +108,12 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
         if !app.enabled {
             return Verdict::PassThrough;
         }
+        // 画面ズーム中は、どのアプリの上でもピンチは画面ズームの操作にする
+        // (拡大したまま VS Code に切り替えたら戻せない、ということが無いように)。
+        if app.screen.is_active() {
+            return screen_zoom(app, delta);
+        }
+
         // フォアグラウンドのアプリに最初に一致したルールを探す。どれにも一致しなければ素通し。
         let Some(exe) = app.foreground.exe_name() else {
             return Verdict::PassThrough;
@@ -109,8 +122,10 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
             return Verdict::PassThrough;
         };
         let rule = &app.rules[index];
-        let RuleAction::Zoom { zoom_in, zoom_out } = rule.action else {
-            return Verdict::PassThrough; // pass = true のルール
+        let (zoom_in, zoom_out) = match rule.action {
+            RuleAction::Pass => return Verdict::PassThrough,
+            RuleAction::ScreenZoom => return screen_zoom(app, delta),
+            RuleAction::Zoom { zoom_in, zoom_out } => (zoom_in, zoom_out),
         };
 
         // 別のアプリ (ルール) に切り替わったら、前のアプリでの蓄積は持ち越さない
@@ -142,4 +157,40 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
         Verdict::Swallow
     })
     .unwrap_or(Verdict::PassThrough)
+}
+
+/// 画面ズーム: 閾値やクールダウンは使わず、delta をそのまま倍率に反映する (連続的に拡大するため)。
+fn screen_zoom(app: &mut AppState, delta: i32) -> Verdict {
+    if !app.magnifier_ready {
+        return Verdict::PassThrough;
+    }
+    if app.screen.apply_delta(delta, &app.screen_settings) {
+        request_screen_update(app);
+    }
+    Verdict::Swallow
+}
+
+fn on_move() {
+    with_state(|app| {
+        if app.screen.is_active() {
+            request_screen_update(app);
+        }
+    });
+}
+
+/// 実際の MagSetFullscreenTransform は window.rs で (フックから戻った後に) 行う。
+/// マウス移動は 1 秒に数百回来ることもあるので、未処理の依頼があるうちは追加で投函しない。
+fn request_screen_update(app: &mut AppState) {
+    if app.screen_update_pending {
+        return;
+    }
+    app.screen_update_pending = true;
+    unsafe {
+        let _ = PostMessageW(
+            Some(app.hwnd),
+            WM_APP_UPDATE_SCREEN_ZOOM,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
 }

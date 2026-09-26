@@ -15,6 +15,7 @@
 //!  メッセージループ (main) ─ GetMessage → DispatchMessage
 //!        ▼
 //!  window::wnd_proc ── WM_APP_SEND_KEYS → input::send_combo (SendInput でキーを送る)
+//!                   ├─ WM_APP_UPDATE_SCREEN_ZOOM → magnifier (画面全体を連続ズーム。screen_zoom ルール)
 //!                   └─ WM_APP_TRAY → トレイメニュー (有効/無効, 設定, 終了)
 //! ```
 
@@ -25,6 +26,7 @@
 mod config;
 mod gesture;
 mod keys;
+mod screen_zoom;
 
 #[cfg(windows)]
 mod app;
@@ -36,6 +38,8 @@ mod foreground;
 mod hook;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod magnifier;
 #[cfg(windows)]
 mod window;
 
@@ -74,12 +78,22 @@ fn run() -> Result<(), String> {
 
     // --- 設定 --------------------------------------------------------------------
     let config_path = config::Config::default_path();
-    let (_, rules) = config::Config::load_or_create(&config_path)
+    let (config, rules) = config::Config::load_or_create(&config_path)
         .map_err(|e| format!("設定ファイルを読み込めませんでした。\n\n{e}"))?;
 
     // --- ウィンドウ・状態・トレイ・フック -------------------------------------------
+    // 画面ズーム用の Magnification API を初期化。失敗しても (screen_zoom ルールが素通しになるだけで) 動作は続ける。
+    // 変数を _hook より先に作るので、終了時は フック解除 → 倍率を 1 倍に戻す の順に後片付けされる。
+    let magnifier = magnifier::Magnifier::init();
+
     let hwnd = window::create_hidden_window().map_err(|e| format!("ウィンドウ作成に失敗: {e}"))?;
-    app::init(app::AppState::new(hwnd, rules, config_path));
+    app::init(app::AppState::new(
+        hwnd,
+        &config,
+        rules,
+        config_path,
+        magnifier.is_some(),
+    ));
     window::tray_add(hwnd);
 
     // フックは「このスレッド」に紐づく。この後のメッセージループが回っている間だけ呼ばれる。
