@@ -34,6 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::app::with_state;
+use crate::autostart;
 use crate::config::Config;
 use crate::input::send_combo;
 use crate::keys::KeyCombo;
@@ -52,6 +53,7 @@ const ID_TOGGLE: usize = 1;
 const ID_OPEN_CONFIG: usize = 2;
 const ID_RELOAD_CONFIG: usize = 3;
 const ID_EXIT: usize = 4;
+const ID_AUTOSTART: usize = 5;
 
 const APP_TITLE: PCWSTR = w!("pinch-zoom");
 
@@ -216,6 +218,17 @@ fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("設定ファイルを開く"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD_CONFIG, w!("設定を再読み込み"));
+        let autostart = if autostart::is_enabled() {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING | autostart,
+            ID_AUTOSTART,
+            w!("Windows 起動時に自動実行"),
+        );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("終了"));
 
@@ -246,6 +259,11 @@ fn show_menu(hwnd: HWND) {
         ID_TOGGLE => toggle_enabled(hwnd),
         ID_OPEN_CONFIG => open_config(),
         ID_RELOAD_CONFIG => reload_config(),
+        ID_AUTOSTART => {
+            if let Err(e) = autostart::set_enabled(!autostart::is_enabled()) {
+                show_error(&format!("自動実行の設定に失敗しました。\n\n{e}"));
+            }
+        }
         ID_EXIT => unsafe {
             // WM_DESTROY → PostQuitMessage → ループ終了、の順で後片付けが走る
             let _ = DestroyWindow(hwnd);

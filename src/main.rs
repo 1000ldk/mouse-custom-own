@@ -29,6 +29,8 @@ mod keys;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod autostart;
+#[cfg(windows)]
 mod foreground;
 #[cfg(windows)]
 mod hook;
