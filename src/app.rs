@@ -20,38 +20,39 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::HWND;
 
-use crate::config::Config;
+use crate::config::Rule;
 use crate::foreground::ForegroundCache;
-use crate::gesture::{PinchSettings, PinchTracker};
+use crate::gesture::PinchTracker;
 
 pub struct AppState {
     pub hwnd: HWND,
     pub enabled: bool,
-    pub config: Config,
     pub config_path: PathBuf,
-    /// config から変換済みのパラメータ (フック内で毎回変換しないようにキャッシュ)
-    pub settings: PinchSettings,
+    /// config.toml から解析済みのルール (フック内で文字列処理をしないよう読み込み時に変換済み)
+    pub rules: Vec<Rule>,
     pub pinch: PinchTracker,
+    /// 直前のピンチに使ったルールの番号。アプリが切り替わったら蓄積をリセットするために覚える。
+    pub last_rule: Option<usize>,
     pub foreground: ForegroundCache,
 }
 
 impl AppState {
-    pub fn new(hwnd: HWND, config: Config, config_path: PathBuf) -> Self {
+    pub fn new(hwnd: HWND, rules: Vec<Rule>, config_path: PathBuf) -> Self {
         Self {
             hwnd,
             enabled: true,
-            settings: config.pinch_settings(),
-            config,
             config_path,
+            rules,
             pinch: PinchTracker::new(),
+            last_rule: None,
             foreground: ForegroundCache::default(),
         }
     }
 
-    pub fn apply_config(&mut self, config: Config) {
-        self.settings = config.pinch_settings();
-        self.config = config;
+    pub fn apply_rules(&mut self, rules: Vec<Rule>) {
+        self.rules = rules;
         self.pinch.reset();
+        self.last_rule = None;
         self.foreground.clear();
     }
 }

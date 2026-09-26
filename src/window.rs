@@ -35,13 +35,13 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::app::with_state;
 use crate::config::Config;
-use crate::gesture::ZoomDirection;
-use crate::input::send_zoom;
+use crate::input::send_combo;
+use crate::keys::KeyCombo;
 
-/// フック → ウィンドウ: 「1 段ズームして」。wParam = 1 なら拡大, 0 なら縮小。
+/// フック → ウィンドウ: 「このキーを送って」。wParam = KeyCombo::to_bits() の値。
 ///
 /// WM_APP 〜 0xBFFF はアプリが自由に使ってよいメッセージ番号の範囲。
-pub const WM_APP_ZOOM: u32 = WM_APP + 1;
+pub const WM_APP_SEND_KEYS: u32 = WM_APP + 1;
 /// Shell → ウィンドウ: トレイアイコンがクリックされた等。lParam にマウスメッセージが入る。
 const WM_APP_TRAY: u32 = WM_APP + 2;
 
@@ -112,14 +112,9 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_APP_ZOOM => {
+        WM_APP_SEND_KEYS => {
             // フックのコールバックはもう戻っているので、ここでは時間を気にせず SendInput してよい。
-            let direction = if wparam.0 != 0 {
-                ZoomDirection::In
-            } else {
-                ZoomDirection::Out
-            };
-            send_zoom(direction);
+            send_combo(KeyCombo::from_bits(wparam.0));
             LRESULT(0)
         }
         WM_APP_TRAY => {
@@ -282,8 +277,8 @@ fn reload_config() {
     };
     // MessageBox もメッセージループを回すので、借用の外で呼ぶ
     match Config::load_or_create(&path) {
-        Ok(config) => {
-            with_state(|app| app.apply_config(config));
+        Ok((_, rules)) => {
+            with_state(|app| app.apply_rules(rules));
         }
         Err(e) => show_error(&format!("設定ファイルを読み込めませんでした。\n\n{e}")),
     }

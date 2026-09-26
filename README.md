@@ -1,11 +1,17 @@
 # pinch-zoom
 
-ノートPCのタッチパッドで **VS Code 上でピンチ** したとき、エディタの文字だけでなく
-**ウィンドウ全体をズーム** (`Ctrl+テンキー+` / `Ctrl+テンキー-`) させる Windows 用の常駐ツールです。
+ノートPCのタッチパッドの **ピンチ** を、アプリごとに好きなキー操作に変換する Windows 用の常駐ツールです。
+既定では次のように動きます。
+
+- **VS Code / Cursor**: エディタの文字だけでなく **ウィンドウ全体をズーム** (`Ctrl+テンキー+` / `Ctrl+テンキー-`)
+- **それ以外の全アプリ**: **Windows 拡大鏡で画面ごと拡大・縮小** (`Win+テンキー+` / `Win+テンキー-`)。拡大鏡は `Win+Esc` で終了
+
+送るキーやアプリの組み合わせは `config.toml` で自由に変えられます ([設定](#設定))。
+
 Rust + [windows クレート](https://crates.io/crates/windows) で書いています。
 
 - 低レベルマウスフック (`SetWindowsHookEx(WH_MOUSE_LL)`) でピンチ (= Ctrl+ホイール) を検知
-- フォアグラウンドが対象アプリ (既定: `Code.exe`) のときだけ元のイベントを握りつぶし、`SendInput` でズームキーを送る
+- フォアグラウンドのアプリに一致するルールがあれば元のイベントを握りつぶし、そのルールのキーを `SendInput` で送る
 - 細かいイベントを蓄積し、閾値に達したら 1 段ズーム → クールダウン
 - タスクトレイ常駐 (有効/無効, 設定ファイルを開く, 設定を再読み込み, 終了)。ウィンドウは出ません
 
@@ -25,16 +31,16 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
        │
        ▼  OS が「フックを登録したスレッド」(= メインスレッド) で呼ぶ
  hook::mouse_proc
-       ├─ ホイール以外 / Ctrl 無し / 無効中 / 対象外アプリ → CallNextHookEx (そのまま通す)
-       └─ 対象アプリ
+       ├─ ホイール以外 / Ctrl 無し / 無効中 / 一致するルール無し / pass ルール → CallNextHookEx (そのまま通す)
+       └─ フォアグラウンドのアプリに一致するルールあり (config.toml の [[rules]] を上から順に照合)
             ├─ gesture::PinchTracker に delta を渡す
-            │     閾値到達 & クールダウン外 → PostMessage(WM_APP_ZOOM) で自分のウィンドウに依頼
+            │     閾値到達 & クールダウン外 → ルールのキーを PostMessage(WM_APP_SEND_KEYS) で自分のウィンドウに依頼
             └─ LRESULT(1) を返して元のイベントを握りつぶす
 
  main のメッセージループ: GetMessage → DispatchMessage
        ▼
  window::wnd_proc
-       ├─ WM_APP_ZOOM → input::send_zoom … SendInput で Ctrl+テンキー± を送る
+       ├─ WM_APP_SEND_KEYS → input::send_combo … SendInput でキーを送る
        ├─ WM_APP_TRAY → トレイのクリック (右クリック: メニュー / ダブルクリック: 有効⇔無効)
        └─ TaskbarCreated → Explorer 再起動時にトレイアイコンを登録し直す
 ```
@@ -46,11 +52,14 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
   メッセージループ経由で行います。
 - **メッセージループは必須。** 低レベルフックのコールバックは、登録したスレッドが `GetMessage` などで
   メッセージを待っているときに実行されます。ウィンドウを出さないアプリでもループが要るのはこのためです。
-- **Ctrl を離さない。** ピンチ中は Ctrl が押された扱いなので、テンキー± だけを送れば `Ctrl+テンキー±` になります。
-  ここで Ctrl の keyup を送るとピンチの残りが普通のスクロールになってしまうので、
-  Ctrl が押されていないときだけ Ctrl の down/up を付け足します。
+- **修飾キーは差分だけ操作する。** ピンチ中は Ctrl が押された扱いです。
+  - `Ctrl+テンキー+` を送るときは Ctrl に触らずテンキー+ だけ送ります。Ctrl の keyup を送ると、
+    ピンチの残りが普通のスクロールになってしまうためです。
+  - `Win+テンキー+` のように Ctrl を含まないキーを送るときは、そのままだと `Ctrl+Win+テンキー+` になるので、
+    一時的に Ctrl を離し、送った後に押し直します。
 - **スキャンコードも送る。** VS Code (Chromium) はキーの物理位置 (`KeyboardEvent.code`) でキーバインドを判定するので、
-  `MapVirtualKeyW` で仮想キーからスキャンコードを求めて `SendInput` に渡しています。
+  `MapVirtualKeyW` で仮想キーからスキャンコードを求めて `SendInput` に渡しています
+  (Win キーや矢印キーなどの「拡張キー」には `KEYEVENTF_EXTENDEDKEY` も付けます)。
 
 ### モジュール構成
 
@@ -59,9 +68,10 @@ VS Code はこれを「エディタのフォントズーム」として扱う (`
 | `src/main.rs` | エントリポイント。多重起動防止 → 設定読込 → 非表示ウィンドウ → トレイ → フック → メッセージループ | あり |
 | `src/hook.rs` | `WH_MOUSE_LL` の登録/解除とコールバック。通す/握りつぶすの判定 | あり |
 | `src/gesture.rs` | delta の蓄積・閾値・クールダウン・向き反転の純粋ロジック | **なし** (Linux でもテスト可) |
-| `src/config.rs` | `config.toml` の読込・既定値生成 | **なし** |
+| `src/config.rs` | `config.toml` の読込・既定値生成・ルールの解析と照合 | **なし** |
+| `src/keys.rs` | `"Ctrl+NumpadAdd"` のようなキー文字列 → 仮想キーコード | **なし** |
 | `src/foreground.rs` | フォアグラウンドウィンドウ → PID → 実行ファイル名 (PID でキャッシュ) | あり |
-| `src/input.rs` | `SendInput` でズームキーを送る | あり |
+| `src/input.rs` | `SendInput` で任意のキーの組み合わせを送る | あり |
 | `src/window.rs` | 非表示ウィンドウ、ウィンドウプロシージャ、タスクトレイとメニュー | あり |
 | `src/app.rs` | 全体の状態 (`thread_local!` + `RefCell`)。コールバックから参照する | あり |
 
@@ -113,8 +123,54 @@ threshold = 120          # 蓄積したホイール量がこの値に達した�
 cooldown_ms = 400        # 1 段ズームした後、入力を無視する時間 (ミリ秒)
 gesture_gap_ms = 500     # 入力がこの時間途切れたら別のピンチとみなし、蓄積をリセット (ミリ秒)
 invert = false           # true でズーム方向を反転
-target_processes = ["Code.exe", "Cursor.exe", "Code - Insiders.exe"]  # 大文字小文字は区別しない
+
+# ルールは上から順に調べ、フォアグラウンドのアプリに最初に一致したものを使う
+[[rules]]
+apps = ["Code.exe", "Cursor.exe"]     # 実行ファイル名 (大文字小文字は区別しない)
+zoom_in = "Ctrl+NumpadAdd"            # ピンチアウトで送るキー
+zoom_out = "Ctrl+NumpadSubtract"      # ピンチインで送るキー
+
+[[rules]]
+apps = ["*"]                          # "*" = 上のどれにも一致しなかった全アプリ
+zoom_in = "Win+NumpadAdd"             # Windows 拡大鏡
+zoom_out = "Win+NumpadSubtract"
 ```
+
+### ルールの書き方
+
+| キー | 意味 |
+| --- | --- |
+| `apps` | 実行ファイル名のリスト。`"*"` は全アプリ。タスクマネージャーの「詳細」タブで名前を確認できます |
+| `zoom_in` / `zoom_out` | ピンチアウト / ピンチインで送るキー |
+| `pass = true` | 何もせずアプリにそのまま渡す (ブラウザなど、アプリ本来のピンチズームを使いたいとき) |
+| `threshold` / `cooldown_ms` | そのルールだけ全体の値を上書き |
+
+キーは `修飾キー+キー` の形で書きます (大文字小文字は区別しない)。
+
+- 修飾キー: `Ctrl`, `Shift`, `Alt`, `Win`
+- キー: `A`〜`Z`, `0`〜`9`, `F1`〜`F24`, `Numpad0`〜`Numpad9`, `NumpadAdd`, `NumpadSubtract`,
+  `NumpadMultiply`, `NumpadDivide`, `Plus`, `Minus`, `Up`/`Down`/`Left`/`Right`, `PageUp`, `PageDown`,
+  `Home`, `End`, `Insert`, `Delete`, `Space`, `Enter`, `Tab`, `Esc`, `Backspace`
+- 一覧に無いキーは仮想キーコードで直接指定: `Ctrl+vk:0xBB`
+  ([仮想キーコード一覧](https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes))
+
+例:
+
+```toml
+# ブラウザはアプリ本来のピンチズームを使う ("*" のルールより上に書く)
+[[rules]]
+apps = ["chrome.exe", "msedge.exe", "firefox.exe"]
+pass = true
+
+# Ctrl+Plus / Ctrl+Minus でズームするアプリに、そのショートカットを送る例
+[[rules]]
+apps = ["SomeApp.exe"]
+zoom_in = "Ctrl+Plus"
+zoom_out = "Ctrl+Minus"
+cooldown_ms = 200
+```
+
+拡大鏡を使わず VS Code だけで動かしたい場合は、`apps = ["*"]` のルールを削除してください。
 
 調整の目安:
 
@@ -153,5 +209,7 @@ New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
 - **VS Code を管理者として実行している場合は動きません。** Windows の UIPI により、通常権限のプロセスから
   管理者権限のウィンドウへ `SendInput` できないためです。本ツールも管理者で起動するか、VS Code を通常権限で起動してください。
 - **AutoHotkey の同等スクリプトと同時に動かさないでください。** 両方がフックして、二重にズームしたり片方が何もしなくなったりします。
-- ズームのキーは VS Code 既定のキーバインド (`workbench.action.zoomIn` = `Ctrl+NumpadAdd`,
+- **拡大鏡**: 初めて `Win+テンキー+` を送ると拡大鏡が起動します。終了は `Win+Esc`。
+  拡大率の刻みや表示方法 (全画面 / レンズ / ドッキング) は「設定 → アクセシビリティ → 拡大鏡」で変えられます。
+- VS Code 用のキーは VS Code 既定のキーバインド (`workbench.action.zoomIn` = `Ctrl+NumpadAdd`,
   `workbench.action.zoomOut` = `Ctrl+NumpadSubtract`) を前提にしています。キーバインドを変えている場合は戻してください。

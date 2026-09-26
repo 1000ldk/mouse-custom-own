@@ -21,7 +21,7 @@
 //!   一定時間 (LowLevelHooksTimeout, 既定 約 300ms〜1s) 以内に返さないと無視され、
 //!   Windows 7 以降は何度も遅れるとフックが黙って外される。
 //!   → コールバック内では重い処理 (ファイル I/O、SendInput の連発、ダイアログ等) をしない。
-//!   ズームのキー送信は PostMessage で自分のウィンドウに依頼し、コールバックから戻った後で行う。
+//!   キー送信は PostMessage で自分のウィンドウに依頼し、コールバックから戻った後で行う。
 
 use std::time::Instant;
 
@@ -33,9 +33,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::with_state;
+use crate::config::{RuleAction, find_rule};
 use crate::gesture::ZoomDirection;
 use crate::input::is_ctrl_down;
-use crate::window::WM_APP_ZOOM;
+use crate::window::WM_APP_SEND_KEYS;
 
 /// 登録したフック。Drop で解除される (RAII)。
 pub struct MouseHook(HHOOK);
@@ -100,27 +101,45 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
         if !app.enabled {
             return Verdict::PassThrough;
         }
-        let is_target = match app.foreground.exe_name() {
-            Some(name) => app.config.is_target(name),
-            None => false,
-        };
-        if !is_target {
+        // フォアグラウンドのアプリに最初に一致したルールを探す。どれにも一致しなければ素通し。
+        let Some(exe) = app.foreground.exe_name() else {
             return Verdict::PassThrough;
+        };
+        let Some(index) = find_rule(&app.rules, exe) else {
+            return Verdict::PassThrough;
+        };
+        let rule = &app.rules[index];
+        let RuleAction::Zoom { zoom_in, zoom_out } = rule.action else {
+            return Verdict::PassThrough; // pass = true のルール
+        };
+
+        // 別のアプリ (ルール) に切り替わったら、前のアプリでの蓄積は持ち越さない
+        if app.last_rule != Some(index) {
+            app.pinch.reset();
+            app.last_rule = Some(index);
         }
 
-        if let Some(direction) = app.pinch.feed(delta, Instant::now(), &app.settings) {
+        if let Some(direction) = app.pinch.feed(delta, Instant::now(), &rule.settings) {
+            let combo = match direction {
+                ZoomDirection::In => zoom_in,
+                ZoomDirection::Out => zoom_out,
+            };
             // ここでは SendInput せず、自分のウィンドウにメッセージを「投函」するだけ。
             // PostMessage はキューに積んで即座に戻るので、フックを待たせない。
             // コールバックから戻った後、メッセージループがこれを取り出して window.rs で SendInput する。
-            let wparam = WPARAM(matches!(direction, ZoomDirection::In) as usize);
+            // 送るキーは整数に詰めて WPARAM で運ぶ。
             unsafe {
-                let _ = PostMessageW(Some(app.hwnd), WM_APP_ZOOM, wparam, LPARAM(0));
+                let _ = PostMessageW(
+                    Some(app.hwnd),
+                    WM_APP_SEND_KEYS,
+                    WPARAM(combo.to_bits()),
+                    LPARAM(0),
+                );
             }
         }
         // 対象アプリ上のピンチは、ズームしたかどうかに関わらず全部握りつぶす
-        // (VS Code に Ctrl+ホイールが届くと、設定次第でエディタのフォントだけ拡大されるため)。
+        // (素通しすると、アプリ本来の Ctrl+ホイール動作 (VS Code ならエディタのフォントだけ拡大) も起きてしまう)。
         Verdict::Swallow
     })
-    // 状態を借用できなかった (再入中) 場合は安全側に倒して素通し
     .unwrap_or(Verdict::PassThrough)
 }
