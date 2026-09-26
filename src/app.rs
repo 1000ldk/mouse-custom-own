@@ -20,9 +20,10 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::HWND;
 
-use crate::config::Rule;
+use crate::config::{Config, Rule};
 use crate::foreground::ForegroundCache;
 use crate::gesture::PinchTracker;
+use crate::screen_zoom::{ScreenZoom, ScreenZoomSettings};
 
 pub struct AppState {
     pub hwnd: HWND,
@@ -34,10 +35,24 @@ pub struct AppState {
     /// 直前のピンチに使ったルールの番号。アプリが切り替わったら蓄積をリセットするために覚える。
     pub last_rule: Option<usize>,
     pub foreground: ForegroundCache,
+    /// 画面ズームの現在の倍率
+    pub screen: ScreenZoom,
+    pub screen_settings: ScreenZoomSettings,
+    /// Magnification API が使えるか (MagInitialize に成功したか)
+    pub magnifier_ready: bool,
+    /// 画面ズームの更新依頼を PostMessage 済みで、まだ処理されていないか。
+    /// マウス移動のたびに投函するとキューが溢れるので、処理されるまで次を投函しない。
+    pub screen_update_pending: bool,
 }
 
 impl AppState {
-    pub fn new(hwnd: HWND, rules: Vec<Rule>, config_path: PathBuf) -> Self {
+    pub fn new(
+        hwnd: HWND,
+        config: &Config,
+        rules: Vec<Rule>,
+        config_path: PathBuf,
+        magnifier_ready: bool,
+    ) -> Self {
         Self {
             hwnd,
             enabled: true,
@@ -46,10 +61,15 @@ impl AppState {
             pinch: PinchTracker::new(),
             last_rule: None,
             foreground: ForegroundCache::default(),
+            screen: ScreenZoom::default(),
+            screen_settings: config.screen_zoom_settings(),
+            magnifier_ready,
+            screen_update_pending: false,
         }
     }
 
-    pub fn apply_rules(&mut self, rules: Vec<Rule>) {
+    pub fn apply_config(&mut self, config: &Config, rules: Vec<Rule>) {
+        self.screen_settings = config.screen_zoom_settings();
         self.rules = rules;
         self.pinch.reset();
         self.last_rule = None;

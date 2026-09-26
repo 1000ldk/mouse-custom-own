@@ -7,6 +7,7 @@
 //! `[[rules]]` を上から順に調べ、フォアグラウンドのアプリに最初に一致したルールを使う。
 //! - `apps`     : 実行ファイル名のリスト。`"*"` は全アプリに一致
 //! - `zoom_in` / `zoom_out` : ピンチアウト / ピンチインで送るキー ("Ctrl+NumpadAdd" など)
+//! - `screen_zoom = true` : 画面全体をピンチ量に合わせて滑らかに拡大する (screen_zoom.rs)
 //! - `pass = true` : 何もせずアプリに Ctrl+ホイールをそのまま渡す (ブラウザ等、自前でズームできるアプリ用)
 //! - `threshold` / `cooldown_ms` : そのルールだけ全体設定を上書きしたいとき
 
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gesture::PinchSettings;
 use crate::keys::KeyCombo;
+use crate::screen_zoom::ScreenZoomSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +32,10 @@ pub struct Config {
     pub gesture_gap_ms: u64,
     /// true ならズームの向きを反転する。
     pub invert: bool,
+    /// 画面ズームの最大倍率。
+    pub screen_zoom_max: f32,
+    /// 画面ズームで倍率を 2 倍にするのに必要なホイール量。小さいほど速く拡大する。
+    pub screen_zoom_speed: f32,
     /// アプリごとのルール (上から順に評価)。
     pub rules: Vec<RuleConfig>,
 }
@@ -40,6 +46,8 @@ pub struct RuleConfig {
     pub apps: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pass: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub screen_zoom: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoom_in: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +65,8 @@ impl Default for Config {
             cooldown_ms: 400,
             gesture_gap_ms: 500,
             invert: false,
+            screen_zoom_max: 8.0,
+            screen_zoom_speed: 400.0,
             rules: vec![
                 // VS Code 系: ウィンドウ全体のズーム
                 RuleConfig {
@@ -65,11 +75,10 @@ impl Default for Config {
                     zoom_out: Some("Ctrl+NumpadSubtract".into()),
                     ..Default::default()
                 },
-                // それ以外の全アプリ: Windows 拡大鏡で画面ごと拡大 (Win+Esc で拡大鏡を終了)
+                // それ以外の全アプリ: 画面全体をピンチ量に合わせて滑らかに拡大
                 RuleConfig {
                     apps: vec!["*".into()],
-                    zoom_in: Some("Win+NumpadAdd".into()),
-                    zoom_out: Some("Win+NumpadSubtract".into()),
+                    screen_zoom: true,
                     ..Default::default()
                 },
             ],
@@ -89,6 +98,8 @@ pub struct Rule {
 pub enum RuleAction {
     /// イベントを素通しする
     Pass,
+    /// 画面全体を連続的に拡大する
+    ScreenZoom,
     /// イベントを握りつぶし、蓄積に応じてキーを送る
     Zoom {
         zoom_in: KeyCombo,
@@ -112,11 +123,15 @@ const TEMPLATE_HEADER: &str = "\
 # cooldown_ms    : 1 段ズームした後、入力を無視する時間 (ミリ秒)
 # gesture_gap_ms : 入力がこの時間途切れたら別のピンチとみなす (ミリ秒)
 # invert         : true でズーム方向を反転
+# screen_zoom_max   : 画面ズームの最大倍率
+# screen_zoom_speed : 画面ズームで倍率を 2 倍にするのに必要なホイール量 (小さいほど速い)
 #
 # [[rules]] は上から順に調べ、最初に一致したものが使われます。
 #   apps      : 実行ファイル名のリスト。\"*\" は全アプリ
 #   zoom_in   : ピンチアウトで送るキー (例: \"Ctrl+NumpadAdd\", \"Ctrl+Plus\", \"Win+NumpadAdd\")
 #   zoom_out  : ピンチインで送るキー
+#   screen_zoom : true なら、キーを送る代わりに画面全体をピンチ量に合わせて滑らかに拡大
+#                 (ピンチした場所が中心。ピンチインで 1 倍に戻すと終了)
 #   pass      : true なら何もせず、アプリ本来のピンチ動作に任せる
 #   threshold / cooldown_ms : そのルールだけ上書き
 #
@@ -145,8 +160,25 @@ impl Config {
             .enumerate()
             .map(|(i, r)| {
                 let at = |e: String| format!("rules[{}] ({:?}): {e}", i + 1, r.apps);
+                if [
+                    r.pass,
+                    r.screen_zoom,
+                    r.zoom_in.is_some() || r.zoom_out.is_some(),
+                ]
+                .iter()
+                .filter(|&&b| b)
+                .count()
+                    > 1
+                {
+                    return Err(at(
+                        "pass / screen_zoom / zoom_in・zoom_out はどれか 1 つだけ指定してください"
+                            .into(),
+                    ));
+                }
                 let action = if r.pass {
                     RuleAction::Pass
+                } else if r.screen_zoom {
+                    RuleAction::ScreenZoom
                 } else {
                     let parse = |k: &Option<String>, name: &str| {
                         let text = k
@@ -173,6 +205,14 @@ impl Config {
                 })
             })
             .collect()
+    }
+
+    pub fn screen_zoom_settings(&self) -> ScreenZoomSettings {
+        ScreenZoomSettings {
+            max_level: self.screen_zoom_max,
+            delta_per_doubling: self.screen_zoom_speed,
+            invert: self.invert,
+        }
     }
 
     /// 設定ファイルのパス: exe と同じフォルダの config.toml
@@ -228,6 +268,7 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(find_rule(&rules, "code.EXE"), Some(0));
         assert_eq!(find_rule(&rules, "notepad.exe"), Some(1));
+        assert_eq!(rules[1].action, RuleAction::ScreenZoom);
     }
 
     #[test]
@@ -262,6 +303,20 @@ mod tests {
         let config = Config::parse("rules = []").unwrap();
         let rules = config.compile_rules().unwrap();
         assert_eq!(find_rule(&rules, "Code.exe"), None);
+    }
+
+    #[test]
+    fn conflicting_actions_are_rejected() {
+        let config = Config::parse(
+            r#"
+            [[rules]]
+            apps = ["*"]
+            screen_zoom = true
+            zoom_in = "Ctrl+NumpadAdd"
+            "#,
+        )
+        .unwrap();
+        assert!(config.compile_rules().is_err());
     }
 
     #[test]

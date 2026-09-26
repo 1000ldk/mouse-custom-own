@@ -38,11 +38,14 @@ use crate::autostart;
 use crate::config::Config;
 use crate::input::send_combo;
 use crate::keys::KeyCombo;
+use crate::magnifier;
 
 /// フック → ウィンドウ: 「このキーを送って」。wParam = KeyCombo::to_bits() の値。
 ///
 /// WM_APP 〜 0xBFFF はアプリが自由に使ってよいメッセージ番号の範囲。
 pub const WM_APP_SEND_KEYS: u32 = WM_APP + 1;
+/// フック → ウィンドウ: 「画面ズームの倍率 / 表示位置を反映して」。
+pub const WM_APP_UPDATE_SCREEN_ZOOM: u32 = WM_APP + 3;
 /// Shell → ウィンドウ: トレイアイコンがクリックされた等。lParam にマウスメッセージが入る。
 const WM_APP_TRAY: u32 = WM_APP + 2;
 
@@ -117,6 +120,10 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_SEND_KEYS => {
             // フックのコールバックはもう戻っているので、ここでは時間を気にせず SendInput してよい。
             send_combo(KeyCombo::from_bits(wparam.0));
+            LRESULT(0)
+        }
+        WM_APP_UPDATE_SCREEN_ZOOM => {
+            update_screen_zoom();
             LRESULT(0)
         }
         WM_APP_TRAY => {
@@ -197,7 +204,39 @@ fn tray_delete(hwnd: HWND) {
     }
 }
 
+/// 画面ズームの倍率と、カーソル位置から計算した表示位置を Magnification API に反映する。
+fn update_screen_zoom() {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    let screen = magnifier::primary_screen_size();
+    let Some((level, offset)) = with_state(|app| {
+        app.screen_update_pending = false;
+        (app.screen.level(), app.screen.offset((pt.x, pt.y), screen))
+    }) else {
+        return;
+    };
+    if !magnifier::set_transform(level, offset) {
+        // Windows の拡大鏡が起動中などで失敗した場合は、こちらの倍率も戻しておく
+        with_state(|app| app.screen.reset());
+    }
+}
+
+/// 画面ズームを 1 倍に戻す
+fn reset_screen_zoom() {
+    let was_active = with_state(|app| {
+        let active = app.screen.is_active();
+        app.screen.reset();
+        active
+    });
+    if was_active == Some(true) {
+        magnifier::set_transform(1.0, (0, 0));
+    }
+}
+
 fn toggle_enabled(hwnd: HWND) {
+    reset_screen_zoom();
     let enabled = with_state(|app| {
         app.enabled = !app.enabled;
         app.pinch.reset();
@@ -295,8 +334,8 @@ fn reload_config() {
     };
     // MessageBox もメッセージループを回すので、借用の外で呼ぶ
     match Config::load_or_create(&path) {
-        Ok((_, rules)) => {
-            with_state(|app| app.apply_rules(rules));
+        Ok((config, rules)) => {
+            with_state(|app| app.apply_config(&config, rules));
         }
         Err(e) => show_error(&format!("設定ファイルを読み込めませんでした。\n\n{e}")),
     }
