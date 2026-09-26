@@ -1,20 +1,20 @@
-//! pinch-zoom: タッチパッドのピンチ (= Ctrl+ホイール) を、VS Code のウィンドウズーム
-//! (Ctrl+テンキー+ / Ctrl+テンキー-) に変換する常駐ツール。
+//! pinch-zoom: タッチパッドのピンチ (= Ctrl+ホイール) を、アプリごとに設定した任意のキー
+//! (VS Code なら Ctrl+テンキー± でウィンドウズーム、それ以外は Win+テンキー± で拡大鏡など) に変換する常駐ツール。
 //!
 //! 全体の流れ:
 //! ```text
 //!  [タッチパッド] ─ピンチ→ Ctrl+WM_MOUSEWHEEL
 //!        │
 //!        ▼  (OS がメインスレッドのメッセージ待ちに割り込んで呼ぶ)
-//!  hook::mouse_proc ── 対象外 ──→ CallNextHookEx (そのまま通す)
-//!        │ 対象アプリ (Code.exe 等) がフォアグラウンド
+//!  hook::mouse_proc ── 一致するルール無し / pass ルール ──→ CallNextHookEx (そのまま通す)
+//!        │ フォアグラウンドのアプリに一致するルールがある (config.toml の [[rules]])
 //!        ├─ gesture::PinchTracker で delta を蓄積、閾値超え & クールダウン外なら
-//!        │     PostMessage(WM_APP_ZOOM) で自分のウィンドウに依頼
+//!        │     ルールのキー (例: Ctrl+NumpadAdd) を PostMessage(WM_APP_SEND_KEYS) で自分のウィンドウに依頼
 //!        └─ LRESULT(1) を返して元のイベントを握りつぶす
 //!
 //!  メッセージループ (main) ─ GetMessage → DispatchMessage
 //!        ▼
-//!  window::wnd_proc ── WM_APP_ZOOM → input::send_zoom (SendInput で Ctrl+テンキー±)
+//!  window::wnd_proc ── WM_APP_SEND_KEYS → input::send_combo (SendInput でキーを送る)
 //!                   └─ WM_APP_TRAY → トレイメニュー (有効/無効, 設定, 終了)
 //! ```
 
@@ -24,6 +24,7 @@
 
 mod config;
 mod gesture;
+mod keys;
 
 #[cfg(windows)]
 mod app;
@@ -71,12 +72,12 @@ fn run() -> Result<(), String> {
 
     // --- 設定 --------------------------------------------------------------------
     let config_path = config::Config::default_path();
-    let config = config::Config::load_or_create(&config_path)
+    let (_, rules) = config::Config::load_or_create(&config_path)
         .map_err(|e| format!("設定ファイルを読み込めませんでした。\n\n{e}"))?;
 
     // --- ウィンドウ・状態・トレイ・フック -------------------------------------------
     let hwnd = window::create_hidden_window().map_err(|e| format!("ウィンドウ作成に失敗: {e}"))?;
-    app::init(app::AppState::new(hwnd, config, config_path));
+    app::init(app::AppState::new(hwnd, rules, config_path));
     window::tray_add(hwnd);
 
     // フックは「このスレッド」に紐づく。この後のメッセージループが回っている間だけ呼ばれる。
