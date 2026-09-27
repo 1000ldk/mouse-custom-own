@@ -35,7 +35,7 @@ pub struct PinchSettings {
 /// ピンチの状態。フックのコールバックから 1 イベントごとに `feed` される。
 #[derive(Debug, Default)]
 pub struct PinchTracker {
-    accumulated: i32,
+    accumulated: f32,
     last_event: Option<Instant>,
     cooldown_until: Option<Instant>,
 }
@@ -47,38 +47,39 @@ impl PinchTracker {
 
     /// ホイール delta を 1 つ受け取り、ズームすべきなら方向を返す。
     ///
-    /// `delta` は WM_MOUSEWHEEL の値そのもの (正 = ホイール上 = ピンチアウト)。
+    /// `delta` は WM_MOUSEWHEEL の値そのもの (正 = ホイール上 = ピンチアウト)、
+    /// またはタッチパッドの指の間隔の変化をホイール量に換算した値 (touch_pinch.rs)。
     /// `now` を引数で受け取るのはテストで時刻を自由に進められるようにするため。
-    pub fn feed(&mut self, delta: i32, now: Instant, s: &PinchSettings) -> Option<ZoomDirection> {
+    pub fn feed(&mut self, delta: f32, now: Instant, s: &PinchSettings) -> Option<ZoomDirection> {
         // 前のイベントから間が空いていたら、新しいピンチの始まりとして蓄積を捨てる。
         if let Some(last) = self.last_event
             && now.saturating_duration_since(last) >= s.gesture_gap
         {
-            self.accumulated = 0;
+            self.accumulated = 0.0;
         }
         self.last_event = Some(now);
 
         // クールダウン中は捨てる (握りつぶすかどうかは呼び出し側が決める)。
         if let Some(until) = self.cooldown_until {
             if now < until {
-                self.accumulated = 0;
+                self.accumulated = 0.0;
                 return None;
             }
             self.cooldown_until = None;
         }
 
         // 途中で向きが変わったら、それまでの蓄積は反対方向なので捨てる。
-        if delta != 0 && self.accumulated != 0 && delta.signum() != self.accumulated.signum() {
-            self.accumulated = 0;
+        if delta != 0.0 && self.accumulated != 0.0 && delta.signum() != self.accumulated.signum() {
+            self.accumulated = 0.0;
         }
-        self.accumulated = self.accumulated.saturating_add(delta);
+        self.accumulated += delta;
 
-        if self.accumulated.abs() < s.threshold.max(1) {
+        if self.accumulated.abs() < s.threshold.max(1) as f32 {
             return None;
         }
 
-        let zoom_in = (self.accumulated > 0) != s.invert;
-        self.accumulated = 0;
+        let zoom_in = (self.accumulated > 0.0) != s.invert;
+        self.accumulated = 0.0;
         self.cooldown_until = Some(now + s.cooldown);
         Some(if zoom_in {
             ZoomDirection::In
@@ -115,9 +116,9 @@ mod tests {
         let s = settings();
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(40, t0, &s), None);
-        assert_eq!(p.feed(40, t0 + ms(10), &s), None);
-        assert_eq!(p.feed(40, t0 + ms(20), &s), Some(ZoomDirection::In));
+        assert_eq!(p.feed(40.0, t0, &s), None);
+        assert_eq!(p.feed(40.0, t0 + ms(10), &s), None);
+        assert_eq!(p.feed(40.0, t0 + ms(20), &s), Some(ZoomDirection::In));
     }
 
     #[test]
@@ -125,7 +126,7 @@ mod tests {
         let s = settings();
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(-120, t0, &s), Some(ZoomDirection::Out));
+        assert_eq!(p.feed(-120.0, t0, &s), Some(ZoomDirection::Out));
     }
 
     #[test]
@@ -133,13 +134,13 @@ mod tests {
         let s = settings();
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(120, t0, &s), Some(ZoomDirection::In));
+        assert_eq!(p.feed(120.0, t0, &s), Some(ZoomDirection::In));
         // クールダウン中はどれだけ来ても反応しない
         for i in 1..20 {
-            assert_eq!(p.feed(120, t0 + ms(i * 10), &s), None);
+            assert_eq!(p.feed(120.0, t0 + ms(i * 10), &s), None);
         }
         // クールダウン明けに閾値を超えれば再び反応する
-        assert_eq!(p.feed(120, t0 + ms(310), &s), Some(ZoomDirection::In));
+        assert_eq!(p.feed(120.0, t0 + ms(310), &s), Some(ZoomDirection::In));
     }
 
     #[test]
@@ -147,10 +148,10 @@ mod tests {
         let s = settings();
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(90, t0, &s), None);
-        assert_eq!(p.feed(-20, t0 + ms(10), &s), None);
+        assert_eq!(p.feed(90.0, t0, &s), None);
+        assert_eq!(p.feed(-20.0, t0 + ms(10), &s), None);
         // 90 の蓄積は捨てられているので +20 では届かない
-        assert_eq!(p.feed(20, t0 + ms(20), &s), None);
+        assert_eq!(p.feed(20.0, t0 + ms(20), &s), None);
     }
 
     #[test]
@@ -158,8 +159,8 @@ mod tests {
         let s = settings();
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(90, t0, &s), None);
-        assert_eq!(p.feed(20, t0 + ms(600), &s), None);
+        assert_eq!(p.feed(90.0, t0, &s), None);
+        assert_eq!(p.feed(20.0, t0 + ms(600), &s), None);
     }
 
     #[test]
@@ -170,6 +171,6 @@ mod tests {
         };
         let t0 = Instant::now();
         let mut p = PinchTracker::new();
-        assert_eq!(p.feed(120, t0, &s), Some(ZoomDirection::Out));
+        assert_eq!(p.feed(120.0, t0, &s), Some(ZoomDirection::Out));
     }
 }

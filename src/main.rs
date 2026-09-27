@@ -6,6 +6,9 @@
 //!  [タッチパッド] ─ピンチ→ Ctrl+WM_MOUSEWHEEL
 //!        │
 //!        ▼  (OS がメインスレッドのメッセージ待ちに割り込んで呼ぶ)
+//!  [タッチパッド] ─生データ→ WM_INPUT → touchpad (2 本指の間隔の変化からピンチを検出)
+//!        └─ フックと同じルールで処理 (Ctrl+ホイールを受け取れないアプリでも動くようにするため)
+//!
 //!  hook::mouse_proc ── 一致するルール無し / pass ルール ──→ CallNextHookEx (そのまま通す)
 //!        │ フォアグラウンドのアプリに一致するルールがある (config.toml の [[rules]])
 //!        ├─ gesture::PinchTracker で delta を蓄積、閾値超え & クールダウン外なら
@@ -27,6 +30,7 @@ mod config;
 mod gesture;
 mod keys;
 mod screen_zoom;
+mod touch_pinch;
 
 #[cfg(windows)]
 mod app;
@@ -40,6 +44,8 @@ mod hook;
 mod input;
 #[cfg(windows)]
 mod magnifier;
+#[cfg(windows)]
+mod touchpad;
 #[cfg(windows)]
 mod window;
 
@@ -95,6 +101,10 @@ fn run() -> Result<(), String> {
         magnifier.is_some(),
     ));
     window::tray_add(hwnd);
+
+    // タッチパッドの生データを受け取る。Ctrl+ホイールを受け取れないアプリ (Chrome, エクスプローラー等) でも
+    // ピンチを検出するため。失敗してもマウスフック経由の従来の動作は続ける。
+    let _ = touchpad::register(hwnd);
 
     // フックは「このスレッド」に紐づく。この後のメッセージループが回っている間だけ呼ばれる。
     let _hook = hook::MouseHook::install().map_err(|e| format!("マウスフックの登録に失敗: {e}"))?;

@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::HRAWINPUT;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW, ShellExecuteW,
@@ -29,13 +30,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MessageBoxW, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SW_SHOWNORMAL, SetForegroundWindow, TPM_BOTTOMALIGN,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    WM_DESTROY, WM_INPUT, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::app::with_state;
 use crate::autostart;
 use crate::config::Config;
+use crate::hook::{PinchAction, apply_pinch, pinch_target};
 use crate::input::send_combo;
 use crate::keys::KeyCombo;
 use crate::magnifier;
@@ -126,6 +128,11 @@ unsafe extern "system" fn wnd_proc(
             update_screen_zoom();
             LRESULT(0)
         }
+        WM_INPUT => {
+            on_touchpad_input(HRAWINPUT(lparam.0 as _));
+            // WM_INPUT は DefWindowProc に渡して後片付けしてもらう決まり
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_APP_TRAY => {
             // 既定 (NOTIFYICON_VERSION 未指定) では lParam の値そのものがマウスメッセージ。
             match lparam.0 as u32 {
@@ -201,6 +208,26 @@ fn tray_update(hwnd: HWND, enabled: bool) {
 fn tray_delete(hwnd: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &notify_icon_data(hwnd, false));
+    }
+}
+
+/// タッチパッドの生データ (touchpad.rs) からピンチを検出したら、フックと同じルールで処理する。
+/// どのアプリがフォアグラウンドでも届くので、Ctrl+ホイールを受け取れないアプリでもズームできる。
+fn on_touchpad_input(handle: HRAWINPUT) {
+    let action = with_state(|app| {
+        let units = app.touchpad.on_input(handle)?;
+        if !app.enabled {
+            return None;
+        }
+        let target = pinch_target(app);
+        apply_pinch(app, target, units)
+    })
+    .flatten();
+    // フックの中ではないので、キー送信も画面更新もここで直接やってよい
+    match action {
+        Some(PinchAction::SendKeys(combo)) => send_combo(combo),
+        Some(PinchAction::UpdateScreen) => update_screen_zoom(),
+        None => {}
     }
 }
 
