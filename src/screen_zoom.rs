@@ -54,8 +54,8 @@ impl ScreenZoom {
     ///
     /// 倍率は掛け算で変える (`level *= 2^(delta / delta_per_doubling)`)。
     /// 足し算だと、2 倍→3 倍 と 8 倍→9 倍 が同じピンチ量になり、高倍率ほど変化が鈍く感じる。
-    pub fn apply_delta(&mut self, delta: i32, s: &ScreenZoomSettings) -> bool {
-        let delta = if s.invert { -delta } else { delta } as f32;
+    pub fn apply_delta(&mut self, delta: f32, s: &ScreenZoomSettings) -> bool {
+        let delta = if s.invert { -delta } else { delta };
         let factor = (delta / s.delta_per_doubling.max(1.0)).exp2();
         let mut next = (self.level * factor).clamp(1.0, s.max_level.max(1.0));
         if next < SNAP_TO_ONE {
@@ -95,12 +95,12 @@ mod tests {
     fn pinch_out_doubles_per_setting() {
         let s = settings();
         let mut z = ScreenZoom::default();
-        assert!(z.apply_delta(400, &s));
+        assert!(z.apply_delta(400.0, &s));
         assert!((z.level() - 2.0).abs() < 1e-4);
         // 細かい delta に分けても同じ倍率になる
         let mut z2 = ScreenZoom::default();
         for _ in 0..20 {
-            z2.apply_delta(20, &s);
+            z2.apply_delta(20.0, &s);
         }
         assert!((z2.level() - 2.0).abs() < 1e-3);
     }
@@ -109,16 +109,16 @@ mod tests {
     fn clamps_and_snaps() {
         let s = settings();
         let mut z = ScreenZoom::default();
-        z.apply_delta(100_000, &s);
+        z.apply_delta(100_000.0, &s);
         assert_eq!(z.level(), 8.0);
-        z.apply_delta(-100_000, &s);
+        z.apply_delta(-100_000.0, &s);
         assert_eq!(z.level(), 1.0);
         assert!(!z.is_active());
         // 1.0 のままピンチインしても変化なし
-        assert!(!z.apply_delta(-100, &s));
+        assert!(!z.apply_delta(-100.0, &s));
         // 1.0 付近まで戻したら 1.0 に吸着する
-        z.apply_delta(400, &s);
-        z.apply_delta(-395, &s);
+        z.apply_delta(400.0, &s);
+        z.apply_delta(-395.0, &s);
         assert_eq!(z.level(), 1.0);
     }
 
@@ -129,8 +129,8 @@ mod tests {
             ..settings()
         };
         let mut z = ScreenZoom::default();
-        assert!(!z.apply_delta(400, &s));
-        assert!(z.apply_delta(-400, &s));
+        assert!(!z.apply_delta(400.0, &s));
+        assert!(z.apply_delta(-400.0, &s));
         assert!(z.is_active());
     }
 
@@ -138,7 +138,7 @@ mod tests {
     fn offset_keeps_point_under_cursor() {
         let s = settings();
         let mut z = ScreenZoom::default();
-        z.apply_delta(800, &s); // 4 倍
+        z.apply_delta(800.0, &s); // 4 倍
         let screen = (1920, 1080);
         for cursor in [(0, 0), (960, 540), (1920, 1080), (123, 987)] {
             let (ox, oy) = z.offset(cursor, screen);

@@ -24,6 +24,7 @@ use crate::config::{Config, Rule};
 use crate::foreground::ForegroundCache;
 use crate::gesture::PinchTracker;
 use crate::screen_zoom::{ScreenZoom, ScreenZoomSettings};
+use crate::touchpad::Touchpad;
 
 pub struct AppState {
     pub hwnd: HWND,
@@ -43,6 +44,8 @@ pub struct AppState {
     /// 画面ズームの更新依頼を PostMessage 済みで、まだ処理されていないか。
     /// マウス移動のたびに投函するとキューが溢れるので、処理されるまで次を投函しない。
     pub screen_update_pending: bool,
+    /// タッチパッドの生データ (Raw Input) からのピンチ検出
+    pub touchpad: Touchpad,
 }
 
 impl AppState {
@@ -65,6 +68,7 @@ impl AppState {
             screen_settings: config.screen_zoom_settings(),
             magnifier_ready,
             screen_update_pending: false,
+            touchpad: Touchpad::default(),
         }
     }
 

@@ -36,6 +36,7 @@ use crate::app::{AppState, with_state};
 use crate::config::{RuleAction, find_rule};
 use crate::gesture::ZoomDirection;
 use crate::input::is_ctrl_down;
+use crate::keys::KeyCombo;
 use crate::window::{WM_APP_SEND_KEYS, WM_APP_UPDATE_SCREEN_ZOOM};
 
 /// 登録したフック。Drop で解除される (RAII)。
@@ -108,48 +109,29 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
         if !app.enabled {
             return Verdict::PassThrough;
         }
-        // 画面ズーム中は、どのアプリの上でもピンチは画面ズームの操作にする
-        // (拡大したまま VS Code に切り替えたら戻せない、ということが無いように)。
-        if app.screen.is_active() {
-            return screen_zoom(app, delta);
-        }
-
-        // フォアグラウンドのアプリに最初に一致したルールを探す。どれにも一致しなければ素通し。
-        let Some(exe) = app.foreground.exe_name() else {
+        let target = pinch_target(app);
+        if let PinchTarget::Pass = target {
             return Verdict::PassThrough;
-        };
-        let Some(index) = find_rule(&app.rules, exe) else {
-            return Verdict::PassThrough;
-        };
-        let rule = &app.rules[index];
-        let (zoom_in, zoom_out) = match rule.action {
-            RuleAction::Pass => return Verdict::PassThrough,
-            RuleAction::ScreenZoom => return screen_zoom(app, delta),
-            RuleAction::Zoom { zoom_in, zoom_out } => (zoom_in, zoom_out),
-        };
-
-        // 別のアプリ (ルール) に切り替わったら、前のアプリでの蓄積は持ち越さない
-        if app.last_rule != Some(index) {
-            app.pinch.reset();
-            app.last_rule = Some(index);
         }
-
-        if let Some(direction) = app.pinch.feed(delta, Instant::now(), &rule.settings) {
-            let combo = match direction {
-                ZoomDirection::In => zoom_in,
-                ZoomDirection::Out => zoom_out,
-            };
-            // ここでは SendInput せず、自分のウィンドウにメッセージを「投函」するだけ。
-            // PostMessage はキューに積んで即座に戻るので、フックを待たせない。
-            // コールバックから戻った後、メッセージループがこれを取り出して window.rs で SendInput する。
-            // 送るキーは整数に詰めて WPARAM で運ぶ。
-            unsafe {
-                let _ = PostMessageW(
-                    Some(app.hwnd),
-                    WM_APP_SEND_KEYS,
-                    WPARAM(combo.to_bits()),
-                    LPARAM(0),
-                );
+        // タッチパッドに 2 本指が触れている = このホイールは Windows がピンチから作ったもの。
+        // ピンチはタッチパッドの生データ (touchpad.rs) の方で処理済みなので、ここでは握りつぶすだけ
+        // (両方で処理すると二重にズームする)。物理マウスの Ctrl+ホイールは従来どおりここで処理する。
+        if !app.touchpad.two_fingers_recently(Instant::now()) {
+            match apply_pinch(app, target, delta as f32) {
+                // ここでは SendInput せず、自分のウィンドウにメッセージを「投函」するだけ。
+                // PostMessage はキューに積んで即座に戻るので、フックを待たせない。
+                // コールバックから戻った後、メッセージループがこれを取り出して window.rs で SendInput する。
+                // 送るキーは整数に詰めて WPARAM で運ぶ。
+                Some(PinchAction::SendKeys(combo)) => unsafe {
+                    let _ = PostMessageW(
+                        Some(app.hwnd),
+                        WM_APP_SEND_KEYS,
+                        WPARAM(combo.to_bits()),
+                        LPARAM(0),
+                    );
+                },
+                Some(PinchAction::UpdateScreen) => request_screen_update(app),
+                None => {}
             }
         }
         // 対象アプリ上のピンチは、ズームしたかどうかに関わらず全部握りつぶす
@@ -159,15 +141,72 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
     .unwrap_or(Verdict::PassThrough)
 }
 
-/// 画面ズーム: 閾値やクールダウンは使わず、delta をそのまま倍率に反映する (連続的に拡大するため)。
-fn screen_zoom(app: &mut AppState, delta: i32) -> Verdict {
-    if !app.magnifier_ready {
-        return Verdict::PassThrough;
+/// ピンチをどこに適用するか
+#[derive(Clone, Copy)]
+pub enum PinchTarget {
+    /// 何もしない (アプリ本来の動作に任せる)
+    Pass,
+    /// 画面全体の連続ズーム
+    Screen,
+    /// app.rules[番号] のキーを送る
+    Keys(usize),
+}
+
+/// ピンチを適用した結果、やるべきこと
+pub enum PinchAction {
+    SendKeys(KeyCombo),
+    UpdateScreen,
+}
+
+/// フォアグラウンドのアプリとルールから、ピンチの行き先を決める。
+/// マウスフック (Ctrl+ホイール) とタッチパッドの生データ (window.rs の WM_INPUT) の両方から使う。
+pub fn pinch_target(app: &mut AppState) -> PinchTarget {
+    // 画面ズーム中は、どのアプリの上でもピンチは画面ズームの操作にする
+    // (拡大したまま VS Code に切り替えたら戻せない、ということが無いように)。
+    if app.screen.is_active() {
+        return PinchTarget::Screen;
     }
-    if app.screen.apply_delta(delta, &app.screen_settings) {
-        request_screen_update(app);
+    // フォアグラウンドのアプリに最初に一致したルールを探す。どれにも一致しなければ素通し。
+    let Some(exe) = app.foreground.exe_name() else {
+        return PinchTarget::Pass;
+    };
+    let Some(index) = find_rule(&app.rules, exe) else {
+        return PinchTarget::Pass;
+    };
+    match app.rules[index].action {
+        RuleAction::Pass => PinchTarget::Pass,
+        RuleAction::ScreenZoom if app.magnifier_ready => PinchTarget::Screen,
+        RuleAction::ScreenZoom => PinchTarget::Pass,
+        RuleAction::Zoom { .. } => PinchTarget::Keys(index),
     }
-    Verdict::Swallow
+}
+
+/// ピンチ量 (ホイール換算) を行き先に反映する。
+pub fn apply_pinch(app: &mut AppState, target: PinchTarget, delta: f32) -> Option<PinchAction> {
+    match target {
+        PinchTarget::Pass => None,
+        // 画面ズーム: 閾値やクールダウンは使わず、delta をそのまま倍率に反映する (連続的に拡大するため)。
+        PinchTarget::Screen => app
+            .screen
+            .apply_delta(delta, &app.screen_settings)
+            .then_some(PinchAction::UpdateScreen),
+        PinchTarget::Keys(index) => {
+            let rule = &app.rules[index];
+            let RuleAction::Zoom { zoom_in, zoom_out } = rule.action else {
+                return None;
+            };
+            // 別のアプリ (ルール) に切り替わったら、前のアプリでの蓄積は持ち越さない
+            if app.last_rule != Some(index) {
+                app.pinch.reset();
+                app.last_rule = Some(index);
+            }
+            let direction = app.pinch.feed(delta, Instant::now(), &rule.settings)?;
+            Some(PinchAction::SendKeys(match direction {
+                ZoomDirection::In => zoom_in,
+                ZoomDirection::Out => zoom_out,
+            }))
+        }
+    }
 }
 
 fn on_move() {
