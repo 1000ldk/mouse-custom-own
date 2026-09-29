@@ -57,7 +57,8 @@ jobs:
           path: target/macos/pinch-zoom-macos.zip
 
   release:
-    if: github.event_name != 'pull_request'
+    # 公開するのは main のビルドだけ (他のブランチで手動実行したときはビルドの確認だけ)
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
