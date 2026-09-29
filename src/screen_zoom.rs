@@ -66,12 +66,14 @@ impl ScreenZoom {
         changed
     }
 
+    #[cfg(windows)]
     pub fn reset(&mut self) {
         self.level = 1.0;
     }
 
     /// カーソル位置に対する表示オフセット (モジュール先頭のコメント参照)。
     /// `cursor` と `screen_size` は主モニターの座標系 (左上が 0,0)。
+    #[cfg(any(test, windows))]
     pub fn offset(&self, cursor: (i32, i32), screen_size: (i32, i32)) -> (i32, i32) {
         let k = 1.0 - 1.0 / self.level;
         let axis = |c: i32, size: i32| (c.clamp(0, size.max(0)) as f32 * k).round() as i32;

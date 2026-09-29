@@ -1,7 +1,8 @@
-# main に push されるたびに Windows 用の exe をビルドし、
+# main に push されるたびに Windows 用の exe と Mac 用のアプリをビルドし、
 # GitHub Releases の "latest" に置き直す。
 # ダウンロード URL は常に同じ:
 #   https://github.com/1000ldk/mouse-custom-own/releases/latest/download/pinch-zoom.exe
+#   https://github.com/1000ldk/mouse-custom-own/releases/latest/download/pinch-zoom-macos.zip
 name: Build & Release
 
 on:
@@ -14,7 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,17 +28,51 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pinch-zoom
+          name: pinch-zoom-windows
           path: target/release/pinch-zoom.exe
 
+  macos:
+    runs-on: macos-latest
+    env:
+      # Info.plist の LSMinimumSystemVersion と合わせる (ScreenCaptureKit は macOS 12.3 から)
+      MACOSX_DEPLOYMENT_TARGET: "12.3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: cargo test
+
+      - name: Build (Apple Silicon + Intel)
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Bundle pinch-zoom.app
+        run: ./macos/bundle.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinch-zoom-macos
+          path: target/macos/pinch-zoom-macos.zip
+
+  release:
+    if: github.event_name != 'pull_request'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish "latest" release
-        if: github.event_name != 'pull_request'
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest target/release/pinch-zoom.exe \
+          gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create latest dist/pinch-zoom.exe dist/pinch-zoom-macos.zip \
+            --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "pinch-zoom (latest)" \
             --notes "main の最新コミット ($GITHUB_SHA) からの自動ビルドです。インストール方法は README を参照してください。" \

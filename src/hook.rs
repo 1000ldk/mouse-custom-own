@@ -170,13 +170,16 @@ pub fn pinch_target(app: &mut AppState) -> PinchTarget {
     let Some(exe) = app.foreground.exe_name() else {
         return PinchTarget::Pass;
     };
-    let Some(index) = find_rule(&app.rules, exe) else {
+    let Some(index) = find_rule(&app.rules, &[exe]) else {
         return PinchTarget::Pass;
     };
     match app.rules[index].action {
         RuleAction::Pass => PinchTarget::Pass,
-        RuleAction::ScreenZoom if app.magnifier_ready => PinchTarget::Screen,
-        RuleAction::ScreenZoom => PinchTarget::Pass,
+        // ウィンドウ単位のズームは Mac 版のみ。Windows ではまだ画面ズームで代用する
+        RuleAction::ScreenZoom | RuleAction::WindowZoom if app.magnifier_ready => {
+            PinchTarget::Screen
+        }
+        RuleAction::ScreenZoom | RuleAction::WindowZoom => PinchTarget::Pass,
         RuleAction::Zoom { .. } => PinchTarget::Keys(index),
     }
 }

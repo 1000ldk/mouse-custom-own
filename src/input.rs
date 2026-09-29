@@ -33,7 +33,7 @@ pub fn send_combo(combo: KeyCombo) {
         (VK_CONTROL, combo.ctrl, is_down(VK_CONTROL)),
         (VK_SHIFT, combo.shift, is_down(VK_SHIFT)),
         (VK_MENU, combo.alt, is_down(VK_MENU)), // VK_MENU = Alt
-        (VK_LWIN, combo.win, is_down(VK_LWIN) || is_down(VK_RWIN)),
+        (VK_LWIN, combo.meta, is_down(VK_LWIN) || is_down(VK_RWIN)),
     ];
 
     let mut inputs = Vec::with_capacity(10);

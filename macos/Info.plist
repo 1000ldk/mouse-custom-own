@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>ja</string>
+    <key>CFBundleDisplayName</key>
+    <string>pinch-zoom</string>
+    <key>CFBundleExecutable</key>
+    <string>pinch-zoom</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.github.1000ldk.pinch-zoom</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>pinch-zoom</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <!-- ScreenCaptureKit が使えるのは macOS 12.3 以降 -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.3</string>
+    <!-- Dock にアイコンを出さない、メニューバーだけの常駐アプリ -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

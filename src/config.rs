@@ -1,14 +1,17 @@
 //! 設定ファイル (config.toml) の読み書き。
 //!
-//! 設定ファイルは exe と同じフォルダの `config.toml`。無ければ既定値で自動生成する。
-//! Win32 に依存しないので Linux でもテストできる。
+//! 置き場所は Windows では exe と同じフォルダ、Mac では `~/Library/Application Support/pinch-zoom/`
+//! (Mac のアプリ本体 (.app) の中に書き込むと署名が壊れるため)。無ければ既定値で自動生成する。
+//! OS の API に依存しないので Linux でもテストできる。
 //!
 //! # ルール
-//! `[[rules]]` を上から順に調べ、フォアグラウンドのアプリに最初に一致したルールを使う。
-//! - `apps`     : 実行ファイル名のリスト。`"*"` は全アプリに一致
+//! `[[rules]]` を上から順に調べ、対象のアプリに最初に一致したルールを使う。
+//! - `apps`     : アプリの名前のリスト。`"*"` は全アプリに一致
+//!   (Windows は実行ファイル名、Mac はバンドル ID かアプリ名)
 //! - `zoom_in` / `zoom_out` : ピンチアウト / ピンチインで送るキー ("Ctrl+NumpadAdd" など)
-//! - `screen_zoom = true` : 画面全体をピンチ量に合わせて滑らかに拡大する (screen_zoom.rs)
-//! - `pass = true` : 何もせずアプリに Ctrl+ホイールをそのまま渡す (ブラウザ等、自前でズームできるアプリ用)
+//! - `screen_zoom = true` : 画面全体をピンチ量に合わせて滑らかに拡大する (Windows。screen_zoom.rs)
+//! - `window_zoom = true` : ピンチしたウィンドウだけを拡大する (Mac。view_zoom.rs)
+//! - `pass = true` : 何もせずアプリ本来のピンチ動作に任せる (ブラウザ等、自前でズームできるアプリ用)
 //! - `threshold` / `cooldown_ms` : そのルールだけ全体設定を上書きしたいとき
 
 use std::path::{Path, PathBuf};
@@ -18,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gesture::PinchSettings;
 use crate::keys::KeyCombo;
+use crate::platform::Platform;
 use crate::screen_zoom::ScreenZoomSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,9 +36,9 @@ pub struct Config {
     pub gesture_gap_ms: u64,
     /// true ならズームの向きを反転する。
     pub invert: bool,
-    /// 画面ズームの最大倍率。
+    /// 画面ズーム / ウィンドウズームの最大倍率。
     pub screen_zoom_max: f32,
-    /// 画面ズームで倍率を 2 倍にするのに必要なホイール量。小さいほど速く拡大する。
+    /// 画面ズーム / ウィンドウズームで倍率を 2 倍にするのに必要なホイール量。小さいほど速く拡大する。
     pub screen_zoom_speed: f32,
     /// アプリごとのルール (上から順に評価)。
     pub rules: Vec<RuleConfig>,
@@ -48,6 +52,8 @@ pub struct RuleConfig {
     pub pass: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub screen_zoom: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub window_zoom: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoom_in: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +66,12 @@ pub struct RuleConfig {
 
 impl Default for Config {
     fn default() -> Self {
+        Self::default_for(Platform::NATIVE)
+    }
+}
+
+impl Config {
+    pub fn default_for(platform: Platform) -> Self {
         Self {
             threshold: 120,
             cooldown_ms: 400,
@@ -67,23 +79,75 @@ impl Default for Config {
             invert: false,
             screen_zoom_max: 8.0,
             screen_zoom_speed: 400.0,
-            rules: vec![
-                // VS Code 系: ウィンドウ全体のズーム
-                RuleConfig {
-                    apps: vec!["Code.exe".into(), "Cursor.exe".into()],
-                    zoom_in: Some("Ctrl+NumpadAdd".into()),
-                    zoom_out: Some("Ctrl+NumpadSubtract".into()),
-                    ..Default::default()
-                },
-                // それ以外の全アプリ: 画面全体をピンチ量に合わせて滑らかに拡大
-                RuleConfig {
-                    apps: vec!["*".into()],
-                    screen_zoom: true,
-                    ..Default::default()
-                },
-            ],
+            rules: match platform {
+                Platform::Windows => default_windows_rules(),
+                Platform::Mac => default_mac_rules(),
+            },
         }
     }
+}
+
+fn apps(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+fn default_windows_rules() -> Vec<RuleConfig> {
+    vec![
+        // VS Code 系: ウィンドウ全体のズーム
+        RuleConfig {
+            apps: apps(&["Code.exe", "Cursor.exe"]),
+            zoom_in: Some("Ctrl+NumpadAdd".into()),
+            zoom_out: Some("Ctrl+NumpadSubtract".into()),
+            ..Default::default()
+        },
+        // それ以外の全アプリ: 画面全体をピンチ量に合わせて滑らかに拡大
+        RuleConfig {
+            apps: apps(&["*"]),
+            screen_zoom: true,
+            ..Default::default()
+        },
+    ]
+}
+
+fn default_mac_rules() -> Vec<RuleConfig> {
+    vec![
+        // VS Code 系: ウィンドウ全体のズーム (⌘ + テンキーの + / - は VS Code 既定のキー)。
+        // テンキーのキーはキーボード配列 (US / JIS) に関係なく同じなので確実に届く
+        RuleConfig {
+            apps: apps(&[
+                "com.microsoft.VSCode",
+                "com.microsoft.VSCodeInsiders",
+                "com.todesktop.230313mzl4w4u92", // Cursor
+            ]),
+            zoom_in: Some("Cmd+NumpadAdd".into()),
+            zoom_out: Some("Cmd+NumpadSubtract".into()),
+            ..Default::default()
+        },
+        // 自前でピンチズームできるアプリは、アプリ本来の動きに任せる
+        RuleConfig {
+            apps: apps(&[
+                "com.google.Chrome",
+                "com.apple.Safari",
+                "com.microsoft.edgemac",
+                "org.mozilla.firefox",
+                "company.thebrowser.Browser", // Arc
+                "com.brave.Browser",
+                "com.operasoftware.Opera",
+                "com.vivaldi.Vivaldi",
+                "com.apple.Preview",
+                "com.apple.Photos",
+                "com.apple.Maps",
+            ]),
+            pass: true,
+            ..Default::default()
+        },
+        // それ以外の全アプリ: ピンチしたウィンドウを Chrome のように拡大
+        RuleConfig {
+            apps: apps(&["*"]),
+            window_zoom: true,
+            ..Default::default()
+        },
+    ]
 }
 
 /// 解析済みのルール。フック内で文字列処理をしないよう、読み込み時に変換しておく。
@@ -100,6 +164,8 @@ pub enum RuleAction {
     Pass,
     /// 画面全体を連続的に拡大する
     ScreenZoom,
+    /// ピンチしたウィンドウだけを連続的に拡大する
+    WindowZoom,
     /// イベントを握りつぶし、蓄積に応じてキーを送る
     Zoom {
         zoom_in: KeyCombo,
@@ -108,14 +174,15 @@ pub enum RuleAction {
 }
 
 impl Rule {
-    pub fn matches(&self, exe_name: &str) -> bool {
+    /// アプリの呼び名 (実行ファイル名、バンドル ID、アプリ名など) のどれかに一致するか
+    pub fn matches(&self, names: &[&str]) -> bool {
         self.apps
             .iter()
-            .any(|a| a == "*" || a.eq_ignore_ascii_case(exe_name))
+            .any(|a| a == "*" || names.iter().any(|n| a.eq_ignore_ascii_case(n)))
     }
 }
 
-const TEMPLATE_HEADER: &str = "\
+const WINDOWS_TEMPLATE_HEADER: &str = "\
 # pinch-zoom の設定ファイル
 # 編集後はトレイアイコンの右クリックメニュー「設定を再読み込み」で反映されます。
 #
@@ -142,6 +209,29 @@ const TEMPLATE_HEADER: &str = "\
 
 ";
 
+const MAC_TEMPLATE_HEADER: &str = "\
+# pinch-zoom の設定ファイル
+# 編集後はメニューバーのアイコンのメニュー「設定を再読み込み」で反映されます。
+#
+# threshold      : キーを送るルールで、ピンチ量がこの値に達したら 1 段ズーム (400 = 指の間隔が 2 倍)
+# cooldown_ms    : 1 段ズームした後、入力を無視する時間 (ミリ秒)
+# gesture_gap_ms : 入力がこの時間途切れたら別のピンチとみなす (ミリ秒)
+# invert         : true でズーム方向を反転
+# screen_zoom_max   : ウィンドウズームの最大倍率
+# screen_zoom_speed : 倍率を 2 倍にするのに必要なピンチ量 (400 = 指の間隔が 2 倍で画面も 2 倍)
+#
+# [[rules]] は上から順に調べ、ピンチしたウィンドウのアプリに最初に一致したものが使われます。
+#   apps      : バンドル ID かアプリ名のリスト。\"*\" は全アプリ
+#               (バンドル ID はターミナルで `osascript -e 'id of app \"アプリ名\"'` で調べられます)
+#   zoom_in   : ピンチアウトで送るキー (例: \"Cmd+NumpadAdd\", \"Cmd+Plus\")
+#   zoom_out  : ピンチインで送るキー
+#   window_zoom : true なら、ピンチしたウィンドウを Chrome のピンチのように滑らかに拡大
+#                 (2 本指スクロールで表示位置を移動。ピンチインで 1 倍に戻すと終了)
+#   pass      : true なら何もせず、アプリ本来のピンチ動作に任せる
+#   threshold / cooldown_ms : そのルールだけ上書き
+
+";
+
 impl Config {
     fn base_settings(&self) -> PinchSettings {
         PinchSettings {
@@ -154,6 +244,10 @@ impl Config {
 
     /// ルールを解析する。キー名の誤りなどはここでエラーにする。
     pub fn compile_rules(&self) -> Result<Vec<Rule>, String> {
+        self.compile_rules_for(Platform::NATIVE)
+    }
+
+    pub fn compile_rules_for(&self, platform: Platform) -> Result<Vec<Rule>, String> {
         let base = self.base_settings();
         self.rules
             .iter()
@@ -163,6 +257,7 @@ impl Config {
                 if [
                     r.pass,
                     r.screen_zoom,
+                    r.window_zoom,
                     r.zoom_in.is_some() || r.zoom_out.is_some(),
                 ]
                 .iter()
@@ -171,7 +266,7 @@ impl Config {
                     > 1
                 {
                     return Err(at(
-                        "pass / screen_zoom / zoom_in・zoom_out はどれか 1 つだけ指定してください"
+                        "pass / screen_zoom / window_zoom / zoom_in・zoom_out はどれか 1 つだけ指定してください"
                             .into(),
                     ));
                 }
@@ -179,12 +274,14 @@ impl Config {
                     RuleAction::Pass
                 } else if r.screen_zoom {
                     RuleAction::ScreenZoom
+                } else if r.window_zoom {
+                    RuleAction::WindowZoom
                 } else {
                     let parse = |k: &Option<String>, name: &str| {
                         let text = k
                             .as_deref()
                             .ok_or_else(|| at(format!("{name} がありません")))?;
-                        KeyCombo::parse(text).map_err(at)
+                        KeyCombo::parse_for(text, platform).map_err(at)
                     };
                     RuleAction::Zoom {
                         zoom_in: parse(&r.zoom_in, "zoom_in")?,
@@ -215,8 +312,15 @@ impl Config {
         }
     }
 
-    /// 設定ファイルのパス: exe と同じフォルダの config.toml
+    /// 設定ファイルのパス。
+    /// - Windows: exe と同じフォルダの config.toml
+    /// - Mac: ~/Library/Application Support/pinch-zoom/config.toml
     pub fn default_path() -> PathBuf {
+        if cfg!(target_os = "macos")
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            return PathBuf::from(home).join("Library/Application Support/pinch-zoom/config.toml");
+        }
         std::env::current_exe()
             .map(|p| p.with_file_name("config.toml"))
             .unwrap_or_else(|_| PathBuf::from("config.toml"))
@@ -229,6 +333,9 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let config = Config::default();
                 // 書き込めなくても (読み取り専用フォルダなど) 既定値で動かす
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
                 let _ = std::fs::write(path, config.to_toml());
                 config
             }
@@ -245,30 +352,91 @@ impl Config {
     }
 
     pub fn to_toml(&self) -> String {
+        self.to_toml_for(Platform::NATIVE)
+    }
+
+    pub fn to_toml_for(&self, platform: Platform) -> String {
+        let header = match platform {
+            Platform::Windows => WINDOWS_TEMPLATE_HEADER,
+            Platform::Mac => MAC_TEMPLATE_HEADER,
+        };
         let body = toml::to_string_pretty(self).expect("Config is always serializable");
-        format!("{TEMPLATE_HEADER}{body}")
+        format!("{header}{body}")
     }
 }
 
-/// 実行ファイル名に最初に一致したルールの番号。
-pub fn find_rule(rules: &[Rule], exe_name: &str) -> Option<usize> {
-    rules.iter().position(|r| r.matches(exe_name))
+/// アプリに最初に一致したルールの番号。
+/// `names` はアプリの呼び名の候補 (Windows は実行ファイル名だけ、Mac はバンドル ID・アプリ名・実行ファイル名)。
+pub fn find_rule(rules: &[Rule], names: &[&str]) -> Option<usize> {
+    rules.iter().position(|r| r.matches(names))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_round_trips_and_compiles() {
-        let text = Config::default().to_toml();
+    fn round_trip(platform: Platform) -> Vec<Rule> {
+        let text = Config::default_for(platform).to_toml_for(platform);
         let parsed = Config::parse(&text).unwrap();
         assert_eq!(parsed.threshold, 120);
-        let rules = parsed.compile_rules().unwrap();
+        parsed.compile_rules_for(platform).unwrap()
+    }
+
+    #[test]
+    fn windows_default_round_trips_and_compiles() {
+        let rules = round_trip(Platform::Windows);
         assert_eq!(rules.len(), 2);
-        assert_eq!(find_rule(&rules, "code.EXE"), Some(0));
-        assert_eq!(find_rule(&rules, "notepad.exe"), Some(1));
+        assert_eq!(find_rule(&rules, &["code.EXE"]), Some(0));
+        assert_eq!(find_rule(&rules, &["notepad.exe"]), Some(1));
         assert_eq!(rules[1].action, RuleAction::ScreenZoom);
+    }
+
+    #[test]
+    fn mac_default_round_trips_and_compiles() {
+        let rules = round_trip(Platform::Mac);
+        let action = |names: &[&str]| rules[find_rule(&rules, names).unwrap()].action;
+        // VS Code は ⌘ + テンキー+ / - を送る
+        let RuleAction::Zoom { zoom_in, zoom_out } = action(&["com.microsoft.VSCode", "Code"])
+        else {
+            panic!("VS Code should send keys");
+        };
+        assert!(zoom_in.meta && !zoom_in.ctrl);
+        assert_eq!((zoom_in.vk, zoom_out.vk), (0x45, 0x4E));
+        // ブラウザはアプリ本来のピンチ
+        assert_eq!(
+            action(&["com.google.Chrome", "Google Chrome"]),
+            RuleAction::Pass
+        );
+        // それ以外はウィンドウズーム
+        assert_eq!(
+            action(&["com.apple.TextEdit", "TextEdit"]),
+            RuleAction::WindowZoom
+        );
+    }
+
+    #[test]
+    fn any_of_the_names_can_match() {
+        let config = Config::parse(
+            r#"
+            [[rules]]
+            apps = ["Terminal"]
+            pass = true
+
+            [[rules]]
+            apps = ["*"]
+            window_zoom = true
+            "#,
+        )
+        .unwrap();
+        let rules = config.compile_rules_for(Platform::Mac).unwrap();
+        assert_eq!(
+            find_rule(&rules, &["com.apple.Terminal", "terminal"]),
+            Some(0)
+        );
+        assert_eq!(
+            find_rule(&rules, &["com.apple.TextEdit", "TextEdit"]),
+            Some(1)
+        );
     }
 
     #[test]
@@ -287,13 +455,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        let rules = config.compile_rules().unwrap();
+        let rules = config.compile_rules_for(Platform::Windows).unwrap();
         assert_eq!(
-            rules[find_rule(&rules, "chrome.exe").unwrap()].action,
+            rules[find_rule(&rules, &["chrome.exe"]).unwrap()].action,
             RuleAction::Pass
         );
-        let other = &rules[find_rule(&rules, "excel.exe").unwrap()];
-        assert!(matches!(other.action, RuleAction::Zoom { zoom_in, .. } if zoom_in.win));
+        let other = &rules[find_rule(&rules, &["excel.exe"]).unwrap()];
+        assert!(matches!(other.action, RuleAction::Zoom { zoom_in, .. } if zoom_in.meta));
         assert_eq!(other.settings.cooldown, Duration::from_millis(100));
         assert_eq!(other.settings.threshold, 120); // 全体設定を継承
     }
@@ -302,21 +470,18 @@ mod tests {
     fn no_rules_means_nothing_matches() {
         let config = Config::parse("rules = []").unwrap();
         let rules = config.compile_rules().unwrap();
-        assert_eq!(find_rule(&rules, "Code.exe"), None);
+        assert_eq!(find_rule(&rules, &["Code.exe"]), None);
     }
 
     #[test]
     fn conflicting_actions_are_rejected() {
-        let config = Config::parse(
-            r#"
-            [[rules]]
-            apps = ["*"]
-            screen_zoom = true
-            zoom_in = "Ctrl+NumpadAdd"
-            "#,
-        )
-        .unwrap();
-        assert!(config.compile_rules().is_err());
+        for body in [
+            "screen_zoom = true\nzoom_in = \"Ctrl+NumpadAdd\"",
+            "window_zoom = true\npass = true",
+        ] {
+            let config = Config::parse(&format!("[[rules]]\napps = [\"*\"]\n{body}")).unwrap();
+            assert!(config.compile_rules().is_err(), "{body}");
+        }
     }
 
     #[test]

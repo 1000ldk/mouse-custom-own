@@ -1,7 +1,12 @@
-//! pinch-zoom: タッチパッドのピンチ (= Ctrl+ホイール) を、アプリごとに設定した任意のキー
-//! (VS Code なら Ctrl+テンキー± でウィンドウズーム、それ以外は Win+テンキー± で拡大鏡など) に変換する常駐ツール。
+//! pinch-zoom: タッチパッドのピンチを、アプリごとに設定した動作
+//! (VS Code ならウィンドウ全体のズーム、それ以外は画面 / ウィンドウの拡大) に変換する常駐ツール。
 //!
-//! 全体の流れ:
+//! Windows 版と Mac 版がある。OS に依存しないロジック (設定、キー名の解析、ズーム量の計算) は共通で、
+//! OS の API を使う部分だけが別になっている。
+//! - Windows 版: このファイルの `run` と、`#[cfg(windows)]` のモジュール
+//! - Mac 版: `mac` モジュール (mac/mod.rs に全体の流れ)
+//!
+//! Windows 版の全体の流れ:
 //! ```text
 //!  [タッチパッド] ─ピンチ→ Ctrl+WM_MOUSEWHEEL
 //!        │
@@ -22,6 +27,8 @@
 //!                   └─ WM_APP_TRAY → トレイメニュー (有効/無効, 設定, 終了)
 //! ```
 
+// Windows / Mac 以外ではロジックのテストだけを動かす (本体は何もしない) ので、未使用の警告を出さない
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 // release ビルドでは「Windows サブシステム」の exe にする = 起動してもコンソール窓が出ない。
 // debug ビルドはコンソールを残し、eprintln! などでデバッグできるようにしている。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -29,8 +36,14 @@
 mod config;
 mod gesture;
 mod keys;
+mod platform;
 mod screen_zoom;
+// タッチパッドの生データからのピンチ検出は Windows 版だけ (テストはどの OS でも実行する)
+#[cfg(any(test, windows))]
 mod touch_pinch;
+// ウィンドウ単位のズームは今のところ Mac 版だけ (テストはどの OS でも実行する)
+#[cfg(any(test, target_os = "macos"))]
+mod view_zoom;
 
 #[cfg(windows)]
 mod app;
@@ -49,9 +62,19 @@ mod touchpad;
 #[cfg(windows)]
 mod window;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod mac;
+
+#[cfg(target_os = "macos")]
 fn main() {
-    eprintln!("pinch-zoom は Windows 専用です (ロジックのテストは `cargo test` で実行できます)。");
+    mac::run();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn main() {
+    eprintln!(
+        "pinch-zoom は Windows と Mac 用です (ロジックのテストは `cargo test` で実行できます)。"
+    );
 }
 
 #[cfg(windows)]

@@ -15,11 +15,8 @@
 //! # ホイール量への換算
 //! 間隔が 2 倍になったら `UNITS_PER_DOUBLING` (= 400) として、既存のホイール量の処理
 //! (gesture.rs の閾値、screen_zoom.rs の倍率) にそのまま渡す。
-//! 画面ズームの既定値 `screen_zoom_speed = 400` と合わせてあるので、既定では
-//! **指の間隔が 2 倍になると画面も 2 倍** という、スマホと同じ感覚になる。
 
-/// 指の間隔が 2 倍になったときのホイール換算量
-pub const UNITS_PER_DOUBLING: f32 = 400.0;
+use crate::gesture::units_from_scale;
 
 /// 2 本指を置いてから、間隔がこの割合 (log2) 以上変わったらピンチとみなす。
 /// 2 本指スクロールでも指の間隔は多少ぶれるので、小さな変化は無視する。
@@ -151,7 +148,7 @@ impl PinchDetector {
             return None;
         }
 
-        let units = (distance / pair.last).log2() * UNITS_PER_DOUBLING;
+        let units = units_from_scale(f64::from(distance / pair.last));
         pair.last = distance;
         (units != 0.0).then_some(units)
     }
@@ -165,6 +162,7 @@ impl PinchDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gesture::UNITS_PER_DOUBLING;
 
     fn c(id: u32, x: f32, y: f32) -> Contact {
         Contact { id, x, y }

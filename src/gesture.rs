@@ -12,6 +12,23 @@
 
 use std::time::{Duration, Instant};
 
+/// ピンチで指の間隔 (= 拡大率) が 2 倍になったときのホイール換算量。
+///
+/// ピンチの量は入力元によって単位が違う (Windows の Ctrl+ホイールの delta、タッチパッドの指の座標、
+/// Mac の拡大ジェスチャーの倍率)。閾値や倍率の計算 (この後の PinchTracker や screen_zoom.rs) を
+/// 共通にするため、すべて「ホイール量」に揃える。
+/// 画面ズームの既定値 `screen_zoom_speed = 400` と合わせてあるので、既定では
+/// **指の間隔が 2 倍になると表示も 2 倍** という、スマホと同じ感覚になる。
+pub const UNITS_PER_DOUBLING: f32 = 400.0;
+
+/// 拡大率 (1.1 = 10% 拡大) をホイール換算量にする。
+pub fn units_from_scale(scale: f64) -> f32 {
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    (scale.log2() * UNITS_PER_DOUBLING as f64) as f32
+}
+
 /// ズームの方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoomDirection {
@@ -161,6 +178,14 @@ mod tests {
         let mut p = PinchTracker::new();
         assert_eq!(p.feed(90.0, t0, &s), None);
         assert_eq!(p.feed(20.0, t0 + ms(600), &s), None);
+    }
+
+    #[test]
+    fn scale_to_units() {
+        assert_eq!(units_from_scale(1.0), 0.0);
+        assert!((units_from_scale(2.0) - UNITS_PER_DOUBLING).abs() < 1e-3);
+        assert!((units_from_scale(0.5) + UNITS_PER_DOUBLING).abs() < 1e-3);
+        assert_eq!(units_from_scale(0.0), 0.0);
     }
 
     #[test]
