@@ -21,8 +21,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::HRAWINPUT;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW, ShellExecuteW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -37,10 +37,11 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 use crate::app::with_state;
 use crate::autostart;
 use crate::config::Config;
-use crate::hook::{PinchAction, apply_pinch, pinch_target};
+use crate::hook::{PinchAction, PinchTarget, apply_pinch, pinch_target};
 use crate::input::send_combo;
 use crate::keys::KeyCombo;
 use crate::magnifier;
+use crate::touchpad;
 
 /// フック → ウィンドウ: 「このキーを送って」。wParam = KeyCombo::to_bits() の値。
 ///
@@ -59,6 +60,7 @@ const ID_OPEN_CONFIG: usize = 2;
 const ID_RELOAD_CONFIG: usize = 3;
 const ID_EXIT: usize = 4;
 const ID_AUTOSTART: usize = 5;
+const ID_TOUCHPAD_SETTINGS: usize = 6;
 
 const APP_TITLE: PCWSTR = w!("pinch-zoom");
 
@@ -129,7 +131,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_INPUT => {
-            on_touchpad_input(HRAWINPUT(lparam.0 as _));
+            on_touchpad_input(hwnd, HRAWINPUT(lparam.0 as _));
             // WM_INPUT は DefWindowProc に渡して後片付けしてもらう決まり
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -138,6 +140,8 @@ unsafe extern "system" fn wnd_proc(
             match lparam.0 as u32 {
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
                 WM_LBUTTONDBLCLK => toggle_enabled(hwnd),
+                // 出している通知は「ピンチ操作でズームがオフ」だけなので、クリックされたら設定を開く
+                NIN_BALLOONUSERCLICK => open_touchpad_settings(),
                 _ => {}
             }
             LRESULT(0)
@@ -175,11 +179,16 @@ fn notify_icon_data(hwnd: HWND, enabled: bool) -> NOTIFYICONDATAW {
     } else {
         "pinch-zoom (無効)"
     };
-    // szTip は固定長の UTF-16 配列 (末尾は NUL 終端)
-    for (dst, src) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
-        *dst = src;
-    }
+    copy_wide(&mut nid.szTip, tip);
     nid
+}
+
+/// 固定長の UTF-16 配列 (szTip など) に文字列を入れる。入りきらない分は切り捨て、末尾は必ず NUL 終端。
+fn copy_wide(dst: &mut [u16], text: &str) {
+    let max = dst.len().saturating_sub(1);
+    for (d, s) in dst[..max].iter_mut().zip(text.encode_utf16()) {
+        *d = s;
+    }
 }
 
 /// システム標準のアイコンを使う (独自アイコンにするならリソースとして exe に埋め込む)。
@@ -211,23 +220,65 @@ fn tray_delete(hwnd: HWND) {
     }
 }
 
+/// トレイアイコンから通知を出す (Windows 10 以降はトースト通知として表示される)。
+/// クリックされると WM_APP_TRAY に NIN_BALLOONUSERCLICK が届く。
+fn tray_notify(hwnd: HWND, title: &str, text: &str) {
+    let enabled = with_state(|app| app.enabled).unwrap_or(true);
+    let mut nid = notify_icon_data(hwnd, enabled);
+    nid.uFlags |= NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    copy_wide(&mut nid.szInfoTitle, title);
+    copy_wide(&mut nid.szInfo, text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
 /// タッチパッドの生データ (touchpad.rs) からピンチを検出したら、フックと同じルールで処理する。
 /// どのアプリがフォアグラウンドでも届くので、Ctrl+ホイールを受け取れないアプリでもズームできる。
-fn on_touchpad_input(handle: HRAWINPUT) {
-    let action = with_state(|app| {
+fn on_touchpad_input(hwnd: HWND, handle: HRAWINPUT) {
+    let (action, check_windows_pinch) = with_state(|app| {
         let units = app.touchpad.on_input(handle)?;
         if !app.enabled {
             return None;
         }
         let target = pinch_target(app);
-        apply_pinch(app, target, units)
+        // アプリ本来のズームに任せるピンチを初めて検出したら、
+        // Windows がピンチをアプリに届ける設定になっているかを確かめる (起動中に 1 回だけ)
+        let check = matches!(target, PinchTarget::App)
+            && !std::mem::replace(&mut app.windows_pinch_checked, true);
+        Some((apply_pinch(app, target, units), check))
     })
-    .flatten();
+    .flatten()
+    .unwrap_or((None, false));
     // フックの中ではないので、キー送信も画面更新もここで直接やってよい
     match action {
         Some(PinchAction::SendKeys(combo)) => send_combo(combo),
         Some(PinchAction::UpdateScreen) => update_screen_zoom(),
         None => {}
+    }
+    // Shell_NotifyIcon は Explorer の応答を待つ間にフックを呼びうるので、借用の外で通知する
+    if check_windows_pinch && !touchpad::windows_pinch_zoom_enabled() {
+        tray_notify(
+            hwnd,
+            "ピンチ操作でズームがオフです",
+            "Windows の「ピンチ操作でズーム」がオフなので、アプリ本来のズームが動きません。\
+             ここをクリックしてタッチパッドの設定を開き、オンにしてください。",
+        );
+    }
+}
+
+/// Windows の設定アプリのタッチパッドのページを開く (「ピンチ操作でズーム」の切り替え用)
+fn open_touchpad_settings() {
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            w!("ms-settings:devices-touchpad"),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -284,6 +335,12 @@ fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN_CONFIG, w!("設定ファイルを開く"));
         let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD_CONFIG, w!("設定を再読み込み"));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_TOUCHPAD_SETTINGS,
+            w!("タッチパッドの設定を開く"),
+        );
         let autostart = if autostart::is_enabled() {
             MF_CHECKED
         } else {
@@ -325,6 +382,7 @@ fn show_menu(hwnd: HWND) {
         ID_TOGGLE => toggle_enabled(hwnd),
         ID_OPEN_CONFIG => open_config(),
         ID_RELOAD_CONFIG => reload_config(),
+        ID_TOUCHPAD_SETTINGS => open_touchpad_settings(),
         ID_AUTOSTART => {
             if let Err(e) = autostart::set_enabled(!autostart::is_enabled()) {
                 show_error(&format!("自動実行の設定に失敗しました。\n\n{e}"));

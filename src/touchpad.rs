@@ -21,21 +21,25 @@
 //! 解析済みの形 (preparsed data) で取得し、HidP_GetUsageValue などに読ませる。
 //!
 //! Raw Input は入力を覗くだけで、アプリへの配送は止められない。
-//! タッチパッドのピンチを他のアプリにも渡したくない場合は Windows 側の「ピンチ操作でズーム」を
-//! オフにする (README 参照)。オフにしても、ここで受け取る生データは変わらず届く。
+//! Windows 側の「ピンチ操作でズーム」がオンなら、ピンチはアプリにもそのまま届く
+//! (pass ルールのアプリでは、これでアプリ本来のズームが動く)。
+//! オフにしても、ここで受け取る生データは変わらず届く。
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HIDP_CAPS, HIDP_STATUS_SUCCESS, HIDP_VALUE_CAPS, HidP_GetCaps, HidP_GetUsageValue,
     HidP_GetUsages, HidP_GetValueCaps, HidP_Input, HidP_MaxUsageListLength, PHIDP_PREPARSED_DATA,
 };
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, HWND};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RID_INPUT, RIDEV_INPUTSINK, RIDI_PREPARSEDDATA, RIM_TYPEHID, RegisterRawInputDevices,
 };
+use windows::core::w;
 
 use crate::touch_pinch::{Contact, FrameAssembler, PinchDetector, Slot};
 
@@ -62,6 +66,28 @@ pub fn register(hwnd: HWND) -> windows::core::Result<()> {
         hwndTarget: hwnd,
     };
     unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) }
+}
+
+/// Windows の「ピンチ操作でズーム」(設定 → Bluetooth とデバイス → タッチパッド → スクロールとズーム) がオンか。
+///
+/// オフだと Windows はピンチをアプリに届けないので、アプリ本来のズーム (pass ルール) が何も起きない。
+/// 設定アプリはこの値を HKCU の PrecisionTouchPad キーの ZoomEnabled (オン = 0xFFFFFFFF, オフ = 0) に保存している。
+/// 値が無ければ (一度も変更していない) Windows の既定どおりオンとみなす。
+pub fn windows_pinch_zoom_enabled() -> bool {
+    let mut value = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\PrecisionTouchPad"),
+            w!("ZoomEnabled"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut c_void),
+            Some(&mut size),
+        )
+    };
+    result != ERROR_SUCCESS || value != 0
 }
 
 #[derive(Default)]

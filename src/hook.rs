@@ -110,7 +110,7 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
             return Verdict::PassThrough;
         }
         let target = pinch_target(app);
-        if let PinchTarget::Pass = target {
+        if let PinchTarget::NoRule | PinchTarget::App = target {
             return Verdict::PassThrough;
         }
         // タッチパッドに 2 本指が触れている = このホイールは Windows がピンチから作ったもの。
@@ -144,8 +144,11 @@ fn on_wheel(info: &MSLLHOOKSTRUCT) -> Verdict {
 /// ピンチをどこに適用するか
 #[derive(Clone, Copy)]
 pub enum PinchTarget {
-    /// 何もしない (アプリ本来の動作に任せる)
-    Pass,
+    /// 一致するルールが無い: 何もしない
+    NoRule,
+    /// pass ルール: 何もせず、アプリ本来のズームに任せる
+    /// (Windows の「ピンチ操作でズーム」がオンなら、Windows がピンチ / Ctrl+ホイールをアプリに届ける)
+    App,
     /// 画面全体の連続ズーム
     Screen,
     /// app.rules[番号] のキーを送る
@@ -168,15 +171,16 @@ pub fn pinch_target(app: &mut AppState) -> PinchTarget {
     }
     // フォアグラウンドのアプリに最初に一致したルールを探す。どれにも一致しなければ素通し。
     let Some(exe) = app.foreground.exe_name() else {
-        return PinchTarget::Pass;
+        return PinchTarget::NoRule;
     };
     let Some(index) = find_rule(&app.rules, exe) else {
-        return PinchTarget::Pass;
+        return PinchTarget::NoRule;
     };
     match app.rules[index].action {
-        RuleAction::Pass => PinchTarget::Pass,
+        RuleAction::Pass => PinchTarget::App,
         RuleAction::ScreenZoom if app.magnifier_ready => PinchTarget::Screen,
-        RuleAction::ScreenZoom => PinchTarget::Pass,
+        // 画面ズームが使えないときは、アプリ本来のズームに任せる
+        RuleAction::ScreenZoom => PinchTarget::App,
         RuleAction::Zoom { .. } => PinchTarget::Keys(index),
     }
 }
@@ -184,7 +188,7 @@ pub fn pinch_target(app: &mut AppState) -> PinchTarget {
 /// ピンチ量 (ホイール換算) を行き先に反映する。
 pub fn apply_pinch(app: &mut AppState, target: PinchTarget, delta: f32) -> Option<PinchAction> {
     match target {
-        PinchTarget::Pass => None,
+        PinchTarget::NoRule | PinchTarget::App => None,
         // 画面ズーム: 閾値やクールダウンは使わず、delta をそのまま倍率に反映する (連続的に拡大するため)。
         PinchTarget::Screen => app
             .screen

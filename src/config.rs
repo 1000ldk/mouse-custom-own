@@ -8,8 +8,12 @@
 //! - `apps`     : 実行ファイル名のリスト。`"*"` は全アプリに一致
 //! - `zoom_in` / `zoom_out` : ピンチアウト / ピンチインで送るキー ("Ctrl+NumpadAdd" など)
 //! - `screen_zoom = true` : 画面全体をピンチ量に合わせて滑らかに拡大する (screen_zoom.rs)
-//! - `pass = true` : 何もせずアプリに Ctrl+ホイールをそのまま渡す (ブラウザ等、自前でズームできるアプリ用)
+//! - `pass = true` : 何もせず、アプリ本来のズームに任せる (Windows がピンチ / Ctrl+ホイールをアプリに届ける)
 //! - `threshold` / `cooldown_ms` : そのルールだけ全体設定を上書きしたいとき
+//!
+//! # 古い設定ファイルの移行
+//! config.toml は exe を更新しても上書きしないので、既定値を変えても古い既定値のまま動き続けてしまう。
+//! そこで `config_version` を持たせ、古いファイルを読んだら 1 回だけ移行して書き戻す ([`Config::migrate`])。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -20,9 +24,18 @@ use crate::gesture::PinchSettings;
 use crate::keys::KeyCombo;
 use crate::screen_zoom::ScreenZoomSettings;
 
+/// 設定ファイルの形式のバージョン。既定値を変えて、古いファイルの移行が必要になったら上げる。
+/// - 0 (項目なし): VS Code 以外は Windows の拡大鏡 (Win+テンキー±) か、画面全体の連続ズーム
+/// - 1: VS Code 以外はアプリ本来のズームに任せる
+const CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// 設定ファイルの形式のバージョン (自動で管理する)。
+    /// ファイルに無ければ (= 古いファイル) 0。Config::default() の値ではなく 0 にするため個別に default を付ける。
+    #[serde(default)]
+    pub config_version: u32,
     /// 蓄積 delta がこの値に達したら 1 段ズームする。
     /// 物理マウスのホイール 1 ノッチ = 120。小さいほど敏感。
     pub threshold: i32,
@@ -40,7 +53,7 @@ pub struct Config {
     pub rules: Vec<RuleConfig>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuleConfig {
     pub apps: Vec<String>,
@@ -61,6 +74,7 @@ pub struct RuleConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CONFIG_VERSION,
             threshold: 120,
             cooldown_ms: 400,
             gesture_gap_ms: 500,
@@ -75,15 +89,34 @@ impl Default for Config {
                     zoom_out: Some("Ctrl+NumpadSubtract".into()),
                     ..Default::default()
                 },
-                // それ以外の全アプリ: 画面全体をピンチ量に合わせて滑らかに拡大
+                // それ以外の全アプリ: アプリ本来のズームに任せる (拡大鏡は使わない)
                 RuleConfig {
                     apps: vec!["*".into()],
-                    screen_zoom: true,
+                    pass: true,
                     ..Default::default()
                 },
             ],
         }
     }
+}
+
+/// config_version 0 の既定値にあった「それ以外の全アプリ」のルール。移行で `pass` に置き換える。
+fn version0_default_catch_all_rules() -> [RuleConfig; 2] {
+    [
+        // Windows の拡大鏡を起動する。拡大鏡は文字入力カーソルを追いかけて画面を動かす
+        RuleConfig {
+            apps: vec!["*".into()],
+            zoom_in: Some("Win+NumpadAdd".into()),
+            zoom_out: Some("Win+NumpadSubtract".into()),
+            ..Default::default()
+        },
+        // 画面全体の連続ズーム (カーソルに合わせて画面が動く)
+        RuleConfig {
+            apps: vec!["*".into()],
+            screen_zoom: true,
+            ..Default::default()
+        },
+    ]
 }
 
 /// 解析済みのルール。フック内で文字列処理をしないよう、読み込み時に変換しておく。
@@ -96,7 +129,7 @@ pub struct Rule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleAction {
-    /// イベントを素通しする
+    /// イベントを素通しし、アプリ本来のズームに任せる
     Pass,
     /// 画面全体を連続的に拡大する
     ScreenZoom,
@@ -119,6 +152,7 @@ const TEMPLATE_HEADER: &str = "\
 # pinch-zoom の設定ファイル
 # 編集後はトレイアイコンの右クリックメニュー「設定を再読み込み」で反映されます。
 #
+# config_version : 設定ファイルの形式 (自動で管理されます。変更しないでください)
 # threshold      : 蓄積したホイール量がこの値に達したら 1 段ズーム (120 = マウスホイール 1 ノッチ)
 # cooldown_ms    : 1 段ズームした後、入力を無視する時間 (ミリ秒)
 # gesture_gap_ms : 入力がこの時間途切れたら別のピンチとみなす (ミリ秒)
@@ -132,13 +166,14 @@ const TEMPLATE_HEADER: &str = "\
 #   zoom_out  : ピンチインで送るキー
 #   screen_zoom : true なら、キーを送る代わりに画面全体をピンチ量に合わせて滑らかに拡大
 #                 (ピンチした場所が中心。ピンチインで 1 倍に戻すと終了)
-#   pass      : true なら何もせず、アプリ本来のピンチ動作に任せる
+#   pass      : true なら何もせず、アプリ本来のズームに任せる
+#               (Windows の「ピンチ操作でズーム」がオンのとき、Windows がピンチをアプリに届けます)
 #   threshold / cooldown_ms : そのルールだけ上書き
 #
-# 例: ブラウザは自前のピンチズームを使う (\"*\" のルールより上に書く)
+# 例: ズーム機能の無いアプリだけ、画面全体を拡大する (\"*\" のルールより上に書く)
 #   [[rules]]
-#   apps = [\"chrome.exe\", \"msedge.exe\", \"firefox.exe\"]
-#   pass = true
+#   apps = [\"SomeApp.exe\"]
+#   screen_zoom = true
 
 ";
 
@@ -222,10 +257,42 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from("config.toml"))
     }
 
+    /// 古い形式の設定を今の形式に移行する。移行したら true (呼び出し側でファイルに書き戻す)。
+    ///
+    /// version 0 → 1: 「それ以外の全アプリ」の既定を、拡大鏡からアプリ本来のズームに変えた。
+    /// 古い既定のまま (利用者が書き換えていない) の `"*"` ルールだけを置き換え、それ以外のルールには触らない。
+    /// 書き戻すと config_version が上がるので、移行は 1 回だけ。その後に自分で
+    /// `screen_zoom = true` などに戻した場合は、そのまま使われる。
+    pub fn migrate(&mut self) -> bool {
+        if self.config_version >= CONFIG_VERSION {
+            return false;
+        }
+        let old = version0_default_catch_all_rules();
+        for rule in &mut self.rules {
+            if old.contains(rule) {
+                *rule = RuleConfig {
+                    apps: vec!["*".into()],
+                    pass: true,
+                    ..Default::default()
+                };
+            }
+        }
+        self.config_version = CONFIG_VERSION;
+        true
+    }
+
     /// 読み込んでルールまで解析する。ファイルが無ければ既定値で作成してから返す。
     pub fn load_or_create(path: &Path) -> Result<(Config, Vec<Rule>), String> {
         let config = match std::fs::read_to_string(path) {
-            Ok(text) => Self::parse(&text).map_err(|e| format!("{}:\n{e}", path.display()))?,
+            Ok(text) => {
+                let mut config =
+                    Self::parse(&text).map_err(|e| format!("{}:\n{e}", path.display()))?;
+                if config.migrate() {
+                    // 書き込めなくても (読み取り専用フォルダなど) 移行後の内容で動かす
+                    let _ = std::fs::write(path, config.to_toml());
+                }
+                config
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let config = Config::default();
                 // 書き込めなくても (読み取り専用フォルダなど) 既定値で動かす
@@ -268,7 +335,78 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(find_rule(&rules, "code.EXE"), Some(0));
         assert_eq!(find_rule(&rules, "notepad.exe"), Some(1));
-        assert_eq!(rules[1].action, RuleAction::ScreenZoom);
+        // VS Code 以外はアプリ本来のズームに任せる
+        assert_eq!(rules[1].action, RuleAction::Pass);
+        // 新しく作ったファイルは移行不要
+        assert!(!parsed.clone().migrate());
+    }
+
+    /// config_version が無い古いファイル (以前の既定値のまま)
+    fn version0_file(catch_all: &str) -> String {
+        format!(
+            r#"
+            threshold = 150
+
+            [[rules]]
+            apps = ["Code.exe", "Cursor.exe"]
+            zoom_in = "Ctrl+NumpadAdd"
+            zoom_out = "Ctrl+NumpadSubtract"
+
+            [[rules]]
+            apps = ["chrome.exe"]
+            pass = true
+
+            [[rules]]
+            apps = ["*"]
+            {catch_all}
+            "#
+        )
+    }
+
+    #[test]
+    fn old_magnifier_and_screen_zoom_defaults_are_migrated() {
+        for catch_all in [
+            "zoom_in = \"Win+NumpadAdd\"\nzoom_out = \"Win+NumpadSubtract\"",
+            "screen_zoom = true",
+        ] {
+            let mut config = Config::parse(&version0_file(catch_all)).unwrap();
+            assert_eq!(config.config_version, 0);
+            assert!(config.migrate());
+            assert_eq!(config.config_version, CONFIG_VERSION);
+            let rules = config.compile_rules().unwrap();
+            assert_eq!(
+                rules[find_rule(&rules, "notepad.exe").unwrap()].action,
+                RuleAction::Pass
+            );
+            // 他のルールと全体設定はそのまま
+            assert!(matches!(rules[0].action, RuleAction::Zoom { .. }));
+            assert_eq!(rules[1].action, RuleAction::Pass);
+            assert_eq!(config.threshold, 150);
+            // 書き戻した内容を読み直しても、もう移行しない
+            let mut reread = Config::parse(&config.to_toml()).unwrap();
+            assert!(!reread.migrate());
+        }
+    }
+
+    #[test]
+    fn customized_catch_all_is_kept() {
+        let mut config =
+            Config::parse(&version0_file("screen_zoom = true\nthreshold = 60")).unwrap();
+        assert!(config.migrate());
+        let rules = config.compile_rules().unwrap();
+        assert_eq!(rules[2].action, RuleAction::ScreenZoom);
+    }
+
+    #[test]
+    fn screen_zoom_chosen_after_migration_is_kept() {
+        let mut config = Config::parse(&format!(
+            "config_version = {CONFIG_VERSION}\n{}",
+            version0_file("screen_zoom = true")
+        ))
+        .unwrap();
+        assert!(!config.migrate());
+        let rules = config.compile_rules().unwrap();
+        assert_eq!(rules[2].action, RuleAction::ScreenZoom);
     }
 
     #[test]
