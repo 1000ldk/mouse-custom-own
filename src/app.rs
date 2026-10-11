@@ -46,6 +46,9 @@ pub struct AppState {
     pub screen_update_pending: bool,
     /// タッチパッドの生データ (Raw Input) からのピンチ検出
     pub touchpad: Touchpad,
+    /// アプリ本来のズームに任せるピンチを検出したときに、Windows の「ピンチ操作でズーム」を確認済みか。
+    /// オフなら通知を出す。起動中に 1 回だけ。
+    pub windows_pinch_checked: bool,
 }
 
 impl AppState {
@@ -69,6 +72,7 @@ impl AppState {
             magnifier_ready,
             screen_update_pending: false,
             touchpad: Touchpad::default(),
+            windows_pinch_checked: false,
         }
     }
 
